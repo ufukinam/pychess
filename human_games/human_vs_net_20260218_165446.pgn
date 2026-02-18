@@ -1,0 +1,10 @@
+[Event "HumanVsNet"]
+[Site "Local"]
+[Date "2026.02.18"]
+[Round "?"]
+[White "Net"]
+[Black "Human"]
+[Result "0-1"]
+
+1. d4 d5 2. f3 c5 3. a4 cxd4 4. g3 d3 5. h4 dxc2 6. b4 cxd1=N 7. Na3 Ne3 8. Bg2 Nxg2+ 9. Kd2 e5 10. g4 e4 11. f4 d4 12. Ra2 e3+ 13. Kd3 Bf5+ 14. gxf5 Bxb4 15. Nh3 Qc7 16. Bd2 Nf6 17. Bxe3 dxe3 18. Kd4 Qd6+ 19. Kc4 Qc5+ 20. Kd3 Qc3# 0-1
+

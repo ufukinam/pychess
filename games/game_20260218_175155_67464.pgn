@@ -1,0 +1,23 @@
+[Event "SelfPlay"]
+[Site "Local"]
+[Date "2026.02.18"]
+[Round "-"]
+[White "Net"]
+[Black "Net"]
+[Result "0-1"]
+[PlyCount "85"]
+[SimEarly "60"]
+[EarlyPlies "16"]
+[SimLate "15"]
+[DrawPenalty "-0.12"]
+[NoProgLimit "30"]
+[NoProgPen "-0.3"]
+[Repeat2Pen "-0.25"]
+[MatScale "0.02"]
+[HalfmoveClockEnd "6"]
+[BrokeNoProg "0"]
+[BrokeRepeat2 "1"]
+[Threefold "0"]
+
+1. Nh3 g5 2. b4 b5 3. e3 d5 4. d4 c6 5. Na3 Kd7 6. c4 Nh6 7. Be2 Bg7 8. Rb1 a6 9. Bf1 g4 10. Be2 f6 11. Bf1 f5 12. Bb2 Ra7 13. Be2 Qf8 14. Bf1 a5 15. Be2 Ba6 16. g3 Bc8 17. Bf1 Ng8 18. Be2 e5 19. f3 h5 20. Bf1 e4 21. Be2 Be5 22. Bf1 Na6 23. Bd3 Kd6 24. Nc2 Qh6 25. Rg1 gxh3 26. a4 axb4 27. Kf1 b3 28. Be2 bxc2 29. a5 c1=N 30. Qe1 exf3 31. Qd1 fxe2+ 32. Ke1 Nc7 33. Kf2 b4 34. Kf3 b3 35. Qe1 f4 36. Qd1 h4 37. Qxe2 fxe3 38. Qf1 Rxa5 39. Qe2 Rc5 40. Qxe3 Qg5 41. Ba3 Qh6 42. Ra1 Qg5 43. Rb1 0-1
+

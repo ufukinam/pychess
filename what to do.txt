@@ -1,0 +1,256 @@
+0) Tech stack
+
+python-chess for rules / legal moves / game end.
+
+PyTorch (or JAX, but PyTorch is friendlier to learn) for the net.
+
+Run on CPU, keep the model small.
+
+Install:
+
+pip install python-chess torch numpy
+
+1) Board + move representation
+1.1 State planes (input to network)
+
+Use an 8×8 board with channels (“planes”). A standard simple encoding:
+
+Piece planes (12):
+
+White: P,N,B,R,Q,K (6)
+
+Black: p,n,b,r,q,k (6)
+
+Extra planes (at least 5):
+
+side to move (1 plane all 1s if white to move else 0s)
+
+castling rights: white K, white Q, black K, black Q (4 planes)
+
+Optional but helpful later:
+
+en-passant file (1 plane marking the file)
+
+halfmove clock (scalar) — can ignore at first
+
+So your input tensor shape: (C, 8, 8) where C = 17 (or 18 with en-passant).
+
+This is easy to implement and works.
+
+1.2 Move encoding (fixed action space)
+
+You need a fixed index for “all possible moves” so the policy head has fixed size.
+
+A very common simple scheme for learning projects:
+
+Action = (from_square 0..63, to_square 0..63, promotion 0..4)
+
+Where promotion:
+
+0 = no promotion
+
+1 = promote to Knight
+
+2 = Bishop
+
+3 = Rook
+
+4 = Queen
+
+That gives: 64 * 64 * 5 = 20480 possible actions.
+That’s bigger than AlphaZero’s 4672, but totally fine for a small CPU project.
+
+You’ll:
+
+Convert each legal chess.Move into an index.
+
+Mask everything else as illegal.
+
+Index formula:
+idx = ((from * 64) + to) * 5 + promo
+
+Promo mapping:
+
+if move.promotion is None → promo = 0
+
+else map {N,B,R,Q} → 1..4
+
+This is straightforward and less error-prone than fancy encodings.
+
+2) Neural network (small ResNet-ish)
+
+AlphaZero uses a residual tower. You can do a tiny version:
+
+Initial conv: C → 64
+
+3–6 residual blocks (CPU-friendly)
+
+Policy head: conv → flatten → linear to 20480 logits
+
+Value head: conv → flatten → MLP → scalar in [-1,1] (tanh)
+
+Even 3 blocks works for learning.
+
+Loss:
+
+Policy: cross-entropy with MCTS target distribution π over actions
+
+Value: MSE between predicted value v(s) and final result z ∈ {+1,0,-1}
+
+Total: L = L_policy + λ * L_value (λ often 1.0)
+
+3) MCTS guided by the network
+
+Each MCTS node stores:
+
+P[a]: prior probability for each legal move a (from network policy after masking + softmax)
+
+N[a]: visit counts
+
+W[a]: total value accumulated
+
+Q[a] = W[a]/N[a] if N>0 else 0
+
+Selection uses PUCT:
+U(a) = Q(a) + c_puct * P[a] * sqrt(sum_N) / (1 + N[a])
+
+Typical CPU-friendly constants:
+
+c_puct = 1.5 (tune later)
+
+simulations per move: start at 50–200 on CPU
+
+Terminal values
+
+If a state is terminal:
+
+z = +1 / 0 / -1 from current player’s perspective.
+When backing up, remember value is from the viewpoint of the player to move at that node; you’ll flip sign when switching players during backup.
+
+4) Self-play: what data you collect
+
+For each move during a self-play game, store:
+
+state_tensor
+
+pi (target distribution over the fixed action space, or store sparse dict of action→prob)
+
+player (whose perspective for value sign)
+At end of game, you have final result z (white win = +1, draw = 0, black win = -1).
+For each stored position:
+
+if position was from white-to-move perspective: target value = z
+
+if black-to-move: target value = -z
+
+Temperature (exploration)
+
+For first N moves (e.g., 10–20 ply), sample from π^ (1/τ) with τ=1
+
+Later moves: pick argmax (τ→0)
+
+Dirichlet noise (root exploration)
+
+At the root node:
+P' = (1-ε)P + ε * Dir(α)
+Typical:
+
+ε = 0.25
+
+α = 0.3 for chess (works as a starting point)
+
+5) Training loop (CPU-friendly)
+
+Keep it simple:
+
+Maintain a replay buffer of recent self-play positions, e.g. 50k–200k samples (on CPU start smaller).
+
+Repeat:
+
+generate games until you have, say, 5k new samples
+
+train for a few epochs over random minibatches (batch 64–256 depending on speed)
+
+periodically evaluate (optional at first)
+
+Important: Even without “gating” (old-vs-new model comparison), you’ll see learning if your MCTS is correct.
+
+6) Minimal project structure
+
+A clean folder layout:
+
+chesszero/
+  env.py          # wrapper around python-chess
+  encode.py       # state_to_tensor, move_to_index, index_to_move, legal_mask
+  net.py          # PyTorch model
+  mcts.py         # Node, search(), run_simulations()
+  selfplay.py     # generate_game(), collect training tuples
+  train.py        # replay buffer, training loop, checkpoints
+  eval.py         # play vs random / vs older net (optional)
+
+7) Step-by-step build plan (so you don’t drown)
+Step 1 — Encoding + legality (most bugs happen here)
+
+Implement move_to_index and index_to_move (promotion handling!)
+
+Implement legal_mask(board) that returns a boolean vector length 20480
+
+Unit test: all legal moves map to unique indices; mask includes them; illegal moves excluded.
+
+Step 2 — Network forward pass
+
+policy_logits, value = net(state)
+
+Apply mask: set illegal logits to -1e9 before softmax.
+
+Step 3 — MCTS correctness without NN
+
+Start with uniform priors + random value = 0
+
+Ensure MCTS runs, expands nodes, returns sensible π (visit counts).
+
+Play a whole game without crashing.
+
+Step 4 — Plug in NN priors/value
+
+On expansion, call net once per newly expanded node.
+
+Cache results.
+
+Step 5 — Self-play data + training
+
+Generate like 10 games, train, repeat.
+
+Evaluate vs random legal-move player and see win rate go up.
+
+8) CPU settings that won’t take forever
+
+Starting settings that are realistic on CPU:
+
+residual blocks: 3
+
+channels: 64
+
+simulations per move: 50 (then 100)
+
+games per iteration: 10–30
+
+max game length: 200 plies (terminate as draw if exceeds)
+
+batch size: 64
+
+learning rate: 1e-3 with Adam
+
+9) Common “why is it not learning?” issues
+
+Value sign flipping wrong during backup or dataset labeling.
+
+Masking wrong (allowing illegal moves or masking legal ones).
+
+MCTS not using priors correctly.
+
+Using raw softmax policy instead of visit-count π as target.
+
+No exploration (temperature=0 from move 1) → collapses early.
+
+Too few simulations or too small replay buffer.

@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import os
+import random
+from collections import deque, Counter
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+
+from net import AlphaZeroNet
+from selfplay import play_self_game
+from replay_store import save_shard, load_shards_into_buffer
+from eval import eval_net_vs_random
+
+
+class ReplayBuffer:
+    def __init__(self, maxlen: int = 50000):
+        self.buf = deque(maxlen=maxlen)
+
+    def add_many(self, samples):
+        self.buf.extend(samples)
+
+    def sample(self, batch_size: int):
+        batch = random.sample(self.buf, batch_size)
+        states = np.stack([b[0] for b in batch], axis=0)
+        pis = np.stack([b[1] for b in batch], axis=0)
+        vals = np.array([b[2] for b in batch], dtype=np.float32)
+        return states, pis, vals
+
+    def __len__(self):
+        return len(self.buf)
+
+
+def train_step(net, opt, states, target_pi, target_v, device="cpu"):
+    net.train()
+    x = torch.from_numpy(states).to(device)
+    pi_t = torch.from_numpy(target_pi).to(device)
+    v_t = torch.from_numpy(target_v).to(device)
+
+    logits, v = net(x)
+
+    logp = F.log_softmax(logits, dim=1)
+    policy_loss = -(pi_t * logp).sum(dim=1).mean()
+    value_loss = F.mse_loss(v, v_t)
+
+    loss = policy_loss + value_loss
+
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+
+    return float(loss.item()), float(policy_loss.item()), float(value_loss.item())
+
+
+def main():
+    # Optional CPU threading tweak (sometimes speeds up, sometimes slows down)
+    # torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
+
+    device = "cpu"
+    net = AlphaZeroNet(in_channels=18, channels=32, num_blocks=2).to(device)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+
+    rb = ReplayBuffer(maxlen=50000)
+
+    os.makedirs("games", exist_ok=True)
+    os.makedirs("replay", exist_ok=True)
+    os.makedirs("runs", exist_ok=True)
+
+    writer = SummaryWriter(log_dir="runs/chesszero")
+
+    # Resume model
+    if os.path.exists("checkpoint_latest.pt"):
+        net.load_state_dict(torch.load("checkpoint_latest.pt", map_location=device))
+        print("Loaded checkpoint_latest.pt")
+
+    # Resume replay
+    loaded = load_shards_into_buffer(rb, out_dir="replay", max_samples=50000)
+    if loaded > 0:
+        print(f"Loaded {loaded} replay samples from ./replay")
+
+    iters = 100
+    games_per_iter = 12
+    batch_size = 64
+    train_batches = 20
+
+    # Bootstrap only if buffer is empty
+    if len(rb) == 0:
+        bootstrap_games = 5
+        for i in range(bootstrap_games):
+            with torch.inference_mode():
+                samples, stats, pgn_path = play_self_game(
+                    net, num_sims=15, device=device, pgn_dir="games", verbose=False
+                )
+            rb.add_many(samples)
+            print(f"Bootstrap {i+1}/{bootstrap_games}: result={stats['result_str']} plies={stats['plies']} pgn={pgn_path}")
+
+    try:
+        for it in range(1, iters + 1):
+            # -------- Self-play --------
+            results = []
+            plies_list = []
+            z_list = []
+            pgn_paths = []
+            iter_samples = []
+
+            captures_list = []
+            pawn_captures_list = []
+            threefold_list = []
+            drawlike_list = []
+            maxplies_list = []
+            no_prog_list = []
+            repeat2_list = []
+            halfmove_end_list = []
+
+            for _ in range(games_per_iter):
+                with torch.inference_mode():
+                    samples, stats, pgn_path = play_self_game(
+                        net, num_sims=15, device=device, pgn_dir="games", verbose=False
+                    )
+
+                rb.add_many(samples)
+                iter_samples.extend(samples)
+
+                results.append(stats["result_str"])
+                plies_list.append(stats["plies"])
+                z_list.append(stats["result_z_white"])
+                if pgn_path:
+                    pgn_paths.append(pgn_path)
+
+                captures_list.append(stats.get("captures", 0))
+                pawn_captures_list.append(stats.get("pawn_captures", 0))
+                threefold_list.append(stats.get("threefold_claimed", 0))
+                drawlike_list.append(stats.get("draw_like", 0))
+                maxplies_list.append(stats.get("ended_by_maxplies", 0))
+                no_prog_list.append(stats.get("broke_no_progress", 0))
+                repeat2_list.append(stats.get("broke_repeat2", 0))
+                halfmove_end_list.append(stats.get("halfmove_clock_end", 0))
+
+            # Persist training data
+            shard_path = save_shard(iter_samples, out_dir="replay")
+            print("Saved replay shard:", shard_path)
+
+            cnt = Counter(results)
+            avg_plies = sum(plies_list) / max(1, len(plies_list))
+            avg_z = float(np.mean(z_list)) if z_list else 0.0
+
+            avg_captures = sum(captures_list) / max(1, len(captures_list))
+            avg_pawn_captures = sum(pawn_captures_list) / max(1, len(pawn_captures_list))
+            threefold_rate = sum(threefold_list) / max(1, len(threefold_list))
+            draw_rate = sum(drawlike_list) / max(1, len(drawlike_list))
+            maxplies_rate = sum(maxplies_list) / max(1, len(maxplies_list))
+            no_prog_rate = sum(no_prog_list) / max(1, len(no_prog_list))
+            repeat2_rate = sum(repeat2_list) / max(1, len(repeat2_list))
+            avg_halfmove_end = sum(halfmove_end_list) / max(1, len(halfmove_end_list))
+
+            print(f"LoopStops: no-progress {no_prog_rate:.2f} | repeat2 {repeat2_rate:.2f} | avg halfmove_end {avg_halfmove_end:.1f}")
+
+            print(
+                f"Self-play: W {cnt.get('1-0',0)} | D {cnt.get('1/2-1/2',0)} | "
+                f"L {cnt.get('0-1',0)} | avg plies {avg_plies:.1f} | avg z {avg_z:+.2f}"
+            )
+            print(
+                f"Extra: avg captures {avg_captures:.1f} | avg pawn captures {avg_pawn_captures:.1f} | "
+                f"threefold {threefold_rate:.2f} | draw {draw_rate:.2f} | maxplies {maxplies_rate:.2f}"
+            )
+
+            if pgn_paths:
+                print("Latest PGN:", pgn_paths[-1])
+
+            # TensorBoard: self-play
+            writer.add_scalar("selfplay/wins", cnt.get("1-0", 0), it)
+            writer.add_scalar("selfplay/draws", cnt.get("1/2-1/2", 0), it)
+            writer.add_scalar("selfplay/losses", cnt.get("0-1", 0), it)
+            writer.add_scalar("selfplay/avg_plies", avg_plies, it)
+            writer.add_scalar("selfplay/avg_z_white", avg_z, it)
+            writer.add_scalar("selfplay/avg_captures", avg_captures, it)
+            writer.add_scalar("selfplay/avg_pawn_captures", avg_pawn_captures, it)
+            writer.add_scalar("selfplay/threefold_rate", threefold_rate, it)
+            writer.add_scalar("selfplay/draw_rate", draw_rate, it)
+            writer.add_scalar("selfplay/maxplies_rate", maxplies_rate, it)
+            writer.add_scalar("selfplay/no_progress_rate", no_prog_rate, it)
+            writer.add_scalar("selfplay/repeat2_rate", repeat2_rate, it)
+            writer.add_scalar("selfplay/avg_halfmove_clock_end", avg_halfmove_end, it)
+            writer.add_scalar("replay/size", len(rb), it)
+
+            # -------- Train --------
+            if len(rb) < batch_size:
+                print("Replay buffer too small to train yet.")
+                continue
+
+            losses = []
+            for _ in range(train_batches):
+                s, pi, v = rb.sample(batch_size)
+                losses.append(train_step(net, opt, s, pi, v, device=device))
+
+            avg = np.mean(losses, axis=0)
+            print(f"Iter {it:03d} | loss={avg[0]:.4f} policy={avg[1]:.4f} value={avg[2]:.4f} | rb={len(rb)}")
+
+            writer.add_scalar("train/loss", avg[0], it)
+            writer.add_scalar("train/policy_loss", avg[1], it)
+            writer.add_scalar("train/value_loss", avg[2], it)
+
+            # Checkpoints
+            torch.save(net.state_dict(), "checkpoint_latest.pt")
+            if it % 10 == 0:
+                torch.save(net.state_dict(), f"checkpoint_{it:03d}.pt")
+                print("Saved checkpoint.")
+
+            # ---- Evaluation vs random ----
+            if it % 5 == 0:
+                with torch.inference_mode():
+                    eval_stats = eval_net_vs_random(net, games=10, num_sims=15, device=device)
+
+                print(
+                    f"[EVAL vs Random] games={eval_stats['games']} "
+                    f"W={eval_stats['wins']} D={eval_stats['draws']} L={eval_stats['losses']} "
+                    f"score={eval_stats['score']:.2f} avg={eval_stats['avg_result']:+.2f}"
+                )
+
+                writer.add_scalar("eval_random/score", eval_stats["score"], it)
+                writer.add_scalar("eval_random/wins", eval_stats["wins"], it)
+                writer.add_scalar("eval_random/draws", eval_stats["draws"], it)
+                writer.add_scalar("eval_random/losses", eval_stats["losses"], it)
+                writer.add_scalar("eval_random/avg_result", eval_stats["avg_result"], it)
+
+    finally:
+        writer.close()
+
+
+if __name__ == "__main__":
+    main()
