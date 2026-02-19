@@ -84,8 +84,8 @@ def _pos_key(board: chess.Board) -> str:
 def play_self_game(
     net,
     num_sims: int = 25,
-    max_plies: int = 120,
-    temp_moves: int = 8,
+    max_plies: int = 180,
+    temp_moves: int = 24,
     temperature: float = 1.0,
     device: str = "cpu",
     pgn_dir: str | None = "games",
@@ -98,16 +98,18 @@ def play_self_game(
     NO_PROGRESS_LIMIT = 30        # halfmoves without pawn move or capture
     NO_PROGRESS_PENALTY = -0.30   # punish stalling harder than draw
 
-    REPEAT2_PENALTY = -0.25       # punish early repetition (A-B-A-B loops)
+    REPEAT2_PENALTY = -0.15       # mild penalty: discourage loops without dominating objective
+    STOP_ON_REPEAT2 = False       # avoid collapsing training into short repeated draws
+    TEMP_FLOOR = 0.20             # keep some exploration after opening
 
     # ---- Make "take pieces" learnable ----
     USE_MATERIAL_SHAPING = True
     MATERIAL_SCALE = 0.02         # 0.01..0.05
 
     # ---- MCTS schedule ----
-    EARLY_SIMS = 60
+    EARLY_SIMS = max(64, int(num_sims))
     EARLY_PLIES = 16
-    LATE_SIMS = num_sims
+    LATE_SIMS = max(32, int(num_sims // 2))
 
     env = ChessEnv()
     board = env.reset()
@@ -131,7 +133,7 @@ def play_self_game(
     pos_counts[_pos_key(board)] = 1
 
     while (not env.is_terminal()) and ply < max_plies:
-        t = temperature if ply < temp_moves else 1e-6
+        t = temperature if ply < temp_moves else TEMP_FLOOR
         sims = EARLY_SIMS if ply < EARLY_PLIES else LATE_SIMS
 
         pi, action = mcts_policy_and_action(
@@ -170,7 +172,7 @@ def play_self_game(
         # update repeat table AFTER move
         k = _pos_key(board)
         pos_counts[k] = pos_counts.get(k, 0) + 1
-        if pos_counts[k] >= 2:
+        if pos_counts[k] >= 2 and STOP_ON_REPEAT2:
             broke_repeat2 = 1
             break
 
@@ -243,6 +245,8 @@ def play_self_game(
                 "NoProgLimit": NO_PROGRESS_LIMIT,
                 "NoProgPen": NO_PROGRESS_PENALTY,
                 "Repeat2Pen": REPEAT2_PENALTY,
+                "StopOnRepeat2": int(STOP_ON_REPEAT2),
+                "TempFloor": TEMP_FLOOR,
                 "MatScale": MATERIAL_SCALE if USE_MATERIAL_SHAPING else 0.0,
                 "HalfmoveClockEnd": int(board.halfmove_clock),
                 "BrokeNoProg": broke_no_progress,

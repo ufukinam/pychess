@@ -56,10 +56,10 @@ def train_step(net, opt, states, target_pi, target_v, device="cpu"):
 
 def main():
     # Optional CPU threading tweak (sometimes speeds up, sometimes slows down)
-    # torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
+    torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
 
-    device = "cpu"
-    net = AlphaZeroNet(in_channels=18, channels=32, num_blocks=2).to(device)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
 
     rb = ReplayBuffer(maxlen=50000)
@@ -80,8 +80,8 @@ def main():
     if loaded > 0:
         print(f"Loaded {loaded} replay samples from ./replay")
 
-    iters = 100
-    games_per_iter = 12
+    iters = 50
+    games_per_iter = 50
     batch_size = 64
     train_batches = 20
 
@@ -91,7 +91,7 @@ def main():
         for i in range(bootstrap_games):
             with torch.inference_mode():
                 samples, stats, pgn_path = play_self_game(
-                    net, num_sims=15, device=device, pgn_dir="games", verbose=False
+                    net, num_sims=100, device=device, pgn_dir="games", verbose=False
                 )
             rb.add_many(samples)
             print(f"Bootstrap {i+1}/{bootstrap_games}: result={stats['result_str']} plies={stats['plies']} pgn={pgn_path}")
@@ -117,9 +117,8 @@ def main():
             for _ in range(games_per_iter):
                 with torch.inference_mode():
                     samples, stats, pgn_path = play_self_game(
-                        net, num_sims=15, device=device, pgn_dir="games", verbose=False
+                        net, num_sims=100, device=device, pgn_dir="games", verbose=False
                     )
-
                 rb.add_many(samples)
                 iter_samples.extend(samples)
 
@@ -209,9 +208,9 @@ def main():
                 print("Saved checkpoint.")
 
             # ---- Evaluation vs random ----
-            if it % 5 == 0:
+            if it % 2 == 0:
                 with torch.inference_mode():
-                    eval_stats = eval_net_vs_random(net, games=10, num_sims=15, device=device)
+                    eval_stats = eval_net_vs_random(net, games=12, num_sims=25, device=device)
 
                 print(
                     f"[EVAL vs Random] games={eval_stats['games']} "

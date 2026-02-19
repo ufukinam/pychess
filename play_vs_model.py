@@ -416,7 +416,7 @@ class PlayVsModel(tk.Tk):
 
 
 def load_model(device="cpu"):
-    net = AlphaZeroNet(in_channels=18, channels=32, num_blocks=2).to(device)
+    net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
     if os.path.exists("checkpoint_latest.pt"):
         net.load_state_dict(torch.load("checkpoint_latest.pt", map_location=device))
         print("Loaded checkpoint_latest.pt")
