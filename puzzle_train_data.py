@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import glob
+import os
+import time
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+
+from encode import ACTION_SIZE
+from net import AlphaZeroNet
+from puzzles import PuzzleExample
+
+
+def mask_illegal_logits(logits: torch.Tensor, legal_masks: torch.Tensor) -> torch.Tensor:
+    return logits.masked_fill(~legal_masks, -1e9)
+
+
+class PuzzleDataset(Dataset):
+    def __init__(self, examples: list[PuzzleExample]):
+        self.examples = examples
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int):
+        ex = self.examples[idx]
+        return (
+            torch.from_numpy(ex.state).float(),
+            torch.tensor(ex.target_index, dtype=torch.long),
+            torch.from_numpy(ex.legal_mask.astype(np.bool_)),
+        )
+
+
+class CachedPuzzleDataset(Dataset):
+    def __init__(self, states: np.ndarray, target_idx: np.ndarray, legal_masks: np.ndarray):
+        self.states = states
+        self.target_idx = target_idx
+        self.legal_masks = legal_masks
+
+    def __len__(self) -> int:
+        return int(self.states.shape[0])
+
+    def __getitem__(self, idx: int):
+        return (
+            torch.from_numpy(self.states[idx]).float(),
+            torch.tensor(int(self.target_idx[idx]), dtype=torch.long),
+            torch.from_numpy(self.legal_masks[idx].astype(np.bool_)),
+        )
+
+
+def list_cache_shards(cache_dir: str, split: str) -> list[str]:
+    pattern = os.path.join(cache_dir, f"{split}_shard_*.npz")
+    return sorted(glob.glob(pattern))
+
+
+def _shard_has_keys(path: str, required_keys: tuple[str, ...]) -> bool:
+    try:
+        data = np.load(path)
+    except Exception:
+        return False
+    files = set(data.files)
+    return all(k in files for k in required_keys)
+
+
+def filter_valid_shards(
+    shard_paths: list[str],
+    required_keys: tuple[str, ...],
+    split_name: str,
+) -> list[str]:
+    valid: list[str] = []
+    dropped = 0
+    for p in shard_paths:
+        if _shard_has_keys(p, required_keys):
+            valid.append(p)
+        else:
+            dropped += 1
+            print(f"[Cache] skipping invalid {split_name} shard: {p}")
+    if dropped > 0:
+        print(f"[Cache] dropped {dropped} invalid {split_name} shard(s)")
+    return valid
+
+
+def load_cached_shard(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    data = np.load(path)
+    states = data["states"].astype(np.float32, copy=False)
+    target_idx = data["target_idx"].astype(np.int64, copy=False)
+    packed = data["legal_masks_packed"]
+    legal_masks = np.unpackbits(packed, axis=1, count=ACTION_SIZE).astype(np.bool_, copy=False)
+    return states, target_idx, legal_masks
+
+
+def shard_num_samples(path: str) -> int:
+    data = np.load(path)
+    return int(data["target_idx"].shape[0])
+
+
+def load_cached_val_shard_with_meta(
+    path: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    data = np.load(path)
+    states = data["states"].astype(np.float32, copy=False)
+    target_idx = data["target_idx"].astype(np.int64, copy=False)
+    packed = data["legal_masks_packed"]
+    legal_masks = np.unpackbits(packed, axis=1, count=ACTION_SIZE).astype(np.bool_, copy=False)
+    fens = data["fens"] if "fens" in data else np.asarray([], dtype=str)
+    moves = data["moves"] if "moves" in data else np.asarray([], dtype=str)
+    puzzle_ids = data["puzzle_ids"] if "puzzle_ids" in data else np.asarray([], dtype=str)
+    return states, target_idx, legal_masks, fens, moves, puzzle_ids
+
+
+def train_one_epoch(
+    net: AlphaZeroNet,
+    loader: DataLoader,
+    opt: torch.optim.Optimizer,
+    device: str,
+    label_smoothing: float = 0.0,
+    progress_every_batches: int = 0,
+) -> float:
+    net.train()
+    total = 0
+    loss_sum = 0.0
+    total_batches = len(loader)
+    t0 = time.time()
+    for batch_idx, (x, target_idx, legal_masks) in enumerate(loader, start=1):
+        x = x.to(device)
+        target_idx = target_idx.to(device)
+        legal_masks = legal_masks.to(device)
+        logits, _ = net(x)
+        masked_logits = mask_illegal_logits(logits, legal_masks)
+        loss = F.cross_entropy(
+            masked_logits, target_idx, label_smoothing=label_smoothing
+        )
+
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        b = x.size(0)
+        total += b
+        loss_sum += float(loss.item()) * b
+        if progress_every_batches > 0 and (
+            batch_idx % progress_every_batches == 0 or batch_idx == total_batches
+        ):
+            avg_loss = loss_sum / max(1, total)
+            elapsed = time.time() - t0
+            print(
+                f"[Train] batch {batch_idx}/{total_batches} "
+                f"({100.0*batch_idx/max(1,total_batches):.1f}%) "
+                f"avg_loss={avg_loss:.4f} elapsed={elapsed:.1f}s"
+            )
+    return loss_sum / max(1, total)
+
+
+def train_one_epoch_from_shards(
+    net: AlphaZeroNet,
+    shard_paths: list[str],
+    opt: torch.optim.Optimizer,
+    device: str,
+    batch_size: int,
+    label_smoothing: float = 0.0,
+    progress_every_batches: int = 0,
+) -> float:
+    if not shard_paths:
+        return 0.0
+
+    net.train()
+    total = 0
+    loss_sum = 0.0
+    total_shards = len(shard_paths)
+    epoch_t0 = time.time()
+    for shard_idx, path in enumerate(shard_paths, start=1):
+        states, target_idx, legal_masks = load_cached_shard(path)
+        loader = DataLoader(
+            CachedPuzzleDataset(states, target_idx, legal_masks),
+            batch_size=batch_size,
+            shuffle=True,
+        )
+        shard_samples = int(states.shape[0])
+        shard_batches = len(loader)
+        shard_t0 = time.time()
+        print(
+            f"[Train] shard {shard_idx}/{total_shards} "
+            f"samples={shard_samples} batches={shard_batches}"
+        )
+        for batch_idx, (x, t, mask) in enumerate(loader, start=1):
+            x = x.to(device)
+            t = t.to(device)
+            mask = mask.to(device)
+            logits, _ = net(x)
+            masked_logits = mask_illegal_logits(logits, mask)
+            loss = F.cross_entropy(
+                masked_logits, t, label_smoothing=label_smoothing
+            )
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            b = x.size(0)
+            total += b
+            loss_sum += float(loss.item()) * b
+            if progress_every_batches > 0 and (
+                batch_idx % progress_every_batches == 0 or batch_idx == shard_batches
+            ):
+                avg_loss = loss_sum / max(1, total)
+                elapsed = time.time() - epoch_t0
+                print(
+                    f"[Train] shard {shard_idx}/{total_shards} batch {batch_idx}/{shard_batches} "
+                    f"avg_loss={avg_loss:.4f} elapsed={elapsed:.1f}s"
+                )
+        print(
+            f"[Train] shard {shard_idx}/{total_shards} done in {time.time()-shard_t0:.1f}s"
+        )
+    return loss_sum / max(1, total)

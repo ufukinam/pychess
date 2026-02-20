@@ -30,6 +30,36 @@ def material_diff_white(board: chess.Board) -> int:
     return score
 
 
+def move_to_action(move: chess.Move) -> int:
+    promo_idx = {
+        None: 0,
+        chess.KNIGHT: 1,
+        chess.BISHOP: 2,
+        chess.ROOK: 3,
+        chess.QUEEN: 4,
+    }[move.promotion]
+    return move.from_square * (64 * 5) + move.to_square * 5 + promo_idx
+
+
+def _captured_piece_value(board: chess.Board, move: chess.Move) -> int:
+    if board.is_en_passant(move):
+        return UNICODE_PIECE_VALUES[chess.PAWN]
+    p = board.piece_at(move.to_square)
+    if p is None:
+        return 0
+    return UNICODE_PIECE_VALUES[p.piece_type]
+
+
+def _exchange_delta_for_mover(board: chess.Board, move: chess.Move) -> int:
+    """Simple exchange proxy: captured-value minus attacker-value."""
+    if not board.is_capture(move):
+        return 0
+    mover_piece = board.piece_at(move.from_square)
+    attacker_val = 0 if mover_piece is None else UNICODE_PIECE_VALUES[mover_piece.piece_type]
+    captured_val = _captured_piece_value(board, move)
+    return captured_val - attacker_val
+
+
 def save_pgn(moves: list[chess.Move], result_str: str, out_dir: str, tags: dict | None = None) -> str:
     os.makedirs(out_dir, exist_ok=True)
 
@@ -85,7 +115,7 @@ def play_self_game(
     net,
     num_sims: int = 25,
     max_plies: int = 180,
-    temp_moves: int = 24,
+    temp_moves: int = 12,
     temperature: float = 1.0,
     device: str = "cpu",
     pgn_dir: str | None = "games",
@@ -100,16 +130,17 @@ def play_self_game(
 
     REPEAT2_PENALTY = -0.15       # mild penalty: discourage loops without dominating objective
     STOP_ON_REPEAT2 = False       # avoid collapsing training into short repeated draws
-    TEMP_FLOOR = 0.20             # keep some exploration after opening
+    TEMP_FLOOR = 0.10             # lower randomness after opening
 
     # ---- Make "take pieces" learnable ----
     USE_MATERIAL_SHAPING = True
     MATERIAL_SCALE = 0.02         # 0.01..0.05
+    EXCHANGE_SCALE = 0.01         # reward favorable exchanges
 
     # ---- MCTS schedule ----
-    EARLY_SIMS = max(64, int(num_sims))
+    EARLY_SIMS = max(128, int(num_sims))
     EARLY_PLIES = 16
-    LATE_SIMS = max(32, int(num_sims // 2))
+    LATE_SIMS = max(64, int(num_sims // 2))
 
     env = ChessEnv()
     board = env.reset()
@@ -122,6 +153,8 @@ def play_self_game(
 
     captures = 0
     pawn_captures = 0
+    favorable_exchanges_white = 0.0
+    free_captures = 0
 
     threefold_claimed = 0
     ended_by_maxplies = 0
@@ -150,6 +183,7 @@ def play_self_game(
         mv = action_to_move(action)
         if mv not in board.legal_moves:
             mv = np.random.choice(list(board.legal_moves))
+            action = move_to_action(mv)
 
         if verbose:
             print(board)
@@ -162,6 +196,18 @@ def play_self_game(
             p = board.piece_at(mv.from_square)
             if p is not None and p.piece_type == chess.PAWN:
                 pawn_captures += 1
+
+            ex_delta = _exchange_delta_for_mover(board, mv)
+            if board.turn == chess.WHITE:
+                favorable_exchanges_white += float(ex_delta)
+            else:
+                favorable_exchanges_white -= float(ex_delta)
+
+            # "Free capture" proxy: destination not currently attacked after capture.
+            b2 = board.copy(stack=False)
+            b2.push(mv)
+            if not b2.is_attacked_by(b2.turn, mv.to_square):
+                free_captures += 1
 
         # play move
         moves.append(mv)
@@ -199,7 +245,9 @@ def play_self_game(
         ended_by_maxplies = 1
 
     # ---- Outcome target (White perspective) ----
+    true_result_str = None
     if env.is_terminal():
+        true_result_str = board.result(claim_draw=True)
         z = float(env.result_value())
         if z == 0.0:
             z = DRAW_PENALTY
@@ -215,13 +263,23 @@ def play_self_game(
     # ---- Material shaping ----
     if USE_MATERIAL_SHAPING:
         md = float(material_diff_white(board))
-        z = float(np.clip(z + MATERIAL_SCALE * md, -1.0, 1.0))
+        z = float(np.clip(
+            z + MATERIAL_SCALE * md + EXCHANGE_SCALE * favorable_exchanges_white,
+            -1.0,
+            1.0,
+        ))
 
-    # PGN result string (keep standard draw display even if we penalize)
-    if z > 0.5:
-        result_str = "1-0"
-    elif z < -0.5:
-        result_str = "0-1"
+    # Keep threefold stats accurate even when game ended via generic
+    # is_game_over(claim_draw=True) branch above.
+    if env.is_terminal() and board.can_claim_threefold_repetition():
+        threefold_claimed = 1
+
+    # PGN result string:
+    # - Use true game result for terminal positions.
+    # - Force draw for non-terminal stops (max plies / loop-control rules),
+    #   even if shaped z is slightly biased for training.
+    if env.is_terminal():
+        result_str = true_result_str if true_result_str is not None else "1/2-1/2"
     else:
         result_str = "1/2-1/2"
 
@@ -248,10 +306,13 @@ def play_self_game(
                 "StopOnRepeat2": int(STOP_ON_REPEAT2),
                 "TempFloor": TEMP_FLOOR,
                 "MatScale": MATERIAL_SCALE if USE_MATERIAL_SHAPING else 0.0,
+                "ExchScale": EXCHANGE_SCALE if USE_MATERIAL_SHAPING else 0.0,
                 "HalfmoveClockEnd": int(board.halfmove_clock),
                 "BrokeNoProg": broke_no_progress,
                 "BrokeRepeat2": broke_repeat2,
                 "Threefold": threefold_claimed,
+                "FavExWhite": round(float(favorable_exchanges_white), 3),
+                "FreeCaps": int(free_captures),
             },
         )
 
@@ -264,6 +325,8 @@ def play_self_game(
         "pgn_path": pgn_path,
         "captures": int(captures),
         "pawn_captures": int(pawn_captures),
+        "free_captures": int(free_captures),
+        "favorable_exchanges_white": float(favorable_exchanges_white),
         "threefold_claimed": int(threefold_claimed),
         "draw_like": int(draw_like),
         "ended_by_maxplies": int(ended_by_maxplies),

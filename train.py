@@ -1,60 +1,41 @@
 from __future__ import annotations
 
+import argparse
 import os
-import random
-from collections import deque, Counter
+from collections import Counter
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from net import AlphaZeroNet
 from selfplay import play_self_game
 from replay_store import save_shard, load_shards_into_buffer
+from selfplay_train_core import ReplayBuffer, train_step
 from eval import eval_net_vs_random
 
 
-class ReplayBuffer:
-    def __init__(self, maxlen: int = 50000):
-        self.buf = deque(maxlen=maxlen)
-
-    def add_many(self, samples):
-        self.buf.extend(samples)
-
-    def sample(self, batch_size: int):
-        batch = random.sample(self.buf, batch_size)
-        states = np.stack([b[0] for b in batch], axis=0)
-        pis = np.stack([b[1] for b in batch], axis=0)
-        vals = np.array([b[2] for b in batch], dtype=np.float32)
-        return states, pis, vals
-
-    def __len__(self):
-        return len(self.buf)
-
-
-def train_step(net, opt, states, target_pi, target_v, device="cpu"):
-    net.train()
-    x = torch.from_numpy(states).to(device)
-    pi_t = torch.from_numpy(target_pi).to(device)
-    v_t = torch.from_numpy(target_v).to(device)
-
-    logits, v = net(x)
-
-    logp = F.log_softmax(logits, dim=1)
-    policy_loss = -(pi_t * logp).sum(dim=1).mean()
-    value_loss = F.mse_loss(v, v_t)
-
-    loss = policy_loss + value_loss
-
-    opt.zero_grad()
-    loss.backward()
-    opt.step()
-
-    return float(loss.item()), float(policy_loss.item()), float(value_loss.item())
-
-
 def main():
+    parser = argparse.ArgumentParser(description="Self-play training loop.")
+    parser.add_argument(
+        "--init_checkpoint",
+        type=str,
+        default="checkpoint_latest.pt",
+        help="Primary checkpoint to load before training.",
+    )
+    parser.add_argument(
+        "--puzzle_checkpoint",
+        type=str,
+        default="checkpoint_puzzle_latest.pt",
+        help="Puzzle-pretrained checkpoint used when --prefer_puzzle_init is set.",
+    )
+    parser.add_argument(
+        "--prefer_puzzle_init",
+        action="store_true",
+        help="If set, prefer puzzle checkpoint over init checkpoint when available.",
+    )
+    args = parser.parse_args()
+
     # Optional CPU threading tweak (sometimes speeds up, sometimes slows down)
     torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
 
@@ -70,20 +51,40 @@ def main():
 
     writer = SummaryWriter(log_dir="runs/chesszero")
 
-    # Resume model
-    if os.path.exists("checkpoint_latest.pt"):
-        net.load_state_dict(torch.load("checkpoint_latest.pt", map_location=device))
-        print("Loaded checkpoint_latest.pt")
+    # Resume model: optionally transfer from puzzle-pretrained checkpoint.
+    loaded_ckpt = None
+    if args.prefer_puzzle_init and args.puzzle_checkpoint and os.path.exists(args.puzzle_checkpoint):
+        net.load_state_dict(torch.load(args.puzzle_checkpoint, map_location=device))
+        loaded_ckpt = args.puzzle_checkpoint
+    elif args.init_checkpoint and os.path.exists(args.init_checkpoint):
+        net.load_state_dict(torch.load(args.init_checkpoint, map_location=device))
+        loaded_ckpt = args.init_checkpoint
+
+    if loaded_ckpt:
+        print(f"Loaded {loaded_ckpt}")
+        with torch.inference_mode():
+            eval_stats = eval_net_vs_random(net, games=12, num_sims=25, device=device)
+        print(
+            f"[INIT EVAL vs Random] W={eval_stats['wins']} D={eval_stats['draws']} "
+            f"L={eval_stats['losses']} score={eval_stats['score']:.2f} avg={eval_stats['avg_result']:+.2f}"
+        )
+        writer.add_scalar("eval_random/init_score", eval_stats["score"], 0)
+        writer.add_scalar("eval_random/init_avg_result", eval_stats["avg_result"], 0)
+    else:
+        print(
+            "No init checkpoint loaded. To start from puzzle pretraining, run: "
+            "python train.py --prefer_puzzle_init"
+        )
 
     # Resume replay
     loaded = load_shards_into_buffer(rb, out_dir="replay", max_samples=50000)
     if loaded > 0:
         print(f"Loaded {loaded} replay samples from ./replay")
 
-    iters = 50
-    games_per_iter = 50
+    iters = 5
+    games_per_iter = 40
     batch_size = 64
-    train_batches = 20
+    train_batches = 32
 
     # Bootstrap only if buffer is empty
     if len(rb) == 0:

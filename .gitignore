@@ -1,0 +1,48 @@
+# ---- Python bytecode / caches ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+
+# ---- Build / test / tooling caches ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- OS/editor noise ----
+.DS_Store
+Thumbs.db
+
+# ---- ML checkpoints / model weights ----
+*.pt
+*.pth
+
+# ---- TensorBoard / training logs ----
+runs/
+
+# ---- Replay shards / caches / generated training data ----
+replay/
+replay_human/
+puzzle_cache/
+puzzle_cache_*/
+*.npz
+
+# ---- Generated game exports ----
+games/
+human_games/
+puzzle_games/
+
+# ---- Large puzzle datasets / generated CSVs ----
+lichess_db_puzzle.csv
+puzzles_synthetic.csv

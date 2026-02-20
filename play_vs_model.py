@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import time
 import numpy as np
@@ -75,7 +76,16 @@ def save_human_shard(samples, out_dir: str):
 
 
 class PlayVsModel(tk.Tk):
-    def __init__(self, net, device="cpu", num_sims=50):
+    def __init__(
+        self,
+        net,
+        device="cpu",
+        num_sims=50,
+        save_training_samples: bool = SAVE_TRAINING_SAMPLES,
+        human_replay_dir: str = HUMAN_REPLAY_DIR,
+        human_pgn_dir: str = HUMAN_PGN_DIR,
+        start_as_black: bool = False,
+    ):
         super().__init__()
         self.title("Play vs Model")
         self.resizable(False, False)
@@ -83,6 +93,9 @@ class PlayVsModel(tk.Tk):
         self.net = net
         self.device = device
         self.num_sims = num_sims
+        self.save_training_samples = bool(save_training_samples)
+        self.human_replay_dir = human_replay_dir
+        self.human_pgn_dir = human_pgn_dir
 
         self.square = 64
         self.margin = 10
@@ -103,7 +116,7 @@ class PlayVsModel(tk.Tk):
         self.btn_flip.grid(row=1, column=2, sticky="ew", padx=6, pady=(0, 10))
 
         # Play as Black toggle
-        self.play_as_black_var = tk.BooleanVar(value=False)
+        self.play_as_black_var = tk.BooleanVar(value=bool(start_as_black))
         self.chk_black = tk.Checkbutton(self, text="Play as Black", variable=self.play_as_black_var, command=self.on_toggle_side)
         self.chk_black.grid(row=1, column=3, sticky="w", padx=6, pady=(0, 10))
 
@@ -124,6 +137,8 @@ class PlayVsModel(tk.Tk):
 
         self.update_label()
         self.draw()
+        if not self.human_is_white:
+            self.after(50, self.net_move)
 
     # -----------------------------
     # Side management
@@ -297,7 +312,12 @@ class PlayVsModel(tk.Tk):
         else:
             z_white = 0.0
 
-        pgn_path = save_pgn_from_moves(self.moves, res, HUMAN_PGN_DIR, human_is_white=self.human_is_white)
+        pgn_path = save_pgn_from_moves(
+            self.moves,
+            res,
+            self.human_pgn_dir,
+            human_is_white=self.human_is_white,
+        )
 
         samples = []
         for state, pi, to_play in self.traj:
@@ -305,8 +325,8 @@ class PlayVsModel(tk.Tk):
             samples.append((state, pi.astype(np.float32), float(v)))
 
         shard_path = None
-        if SAVE_TRAINING_SAMPLES and samples:
-            shard_path = save_human_shard(samples, HUMAN_REPLAY_DIR)
+        if self.save_training_samples and samples:
+            shard_path = save_human_shard(samples, self.human_replay_dir)
 
         msg = f"Game over: {res}\nSaved PGN: {pgn_path}"
         if shard_path:
@@ -415,23 +435,49 @@ class PlayVsModel(tk.Tk):
         self.canvas.create_rectangle(x0 + 2, y0 + 2, x1 - 2, y1 - 2, outline=outline, width=3)
 
 
-def load_model(device="cpu"):
+def load_model(device="cpu", checkpoint_path: str = "checkpoint_latest.pt"):
     net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
-    if os.path.exists("checkpoint_latest.pt"):
-        net.load_state_dict(torch.load("checkpoint_latest.pt", map_location=device))
-        print("Loaded checkpoint_latest.pt")
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        net.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        print(f"Loaded {checkpoint_path}")
     else:
-        print("No checkpoint_latest.pt found, using untrained model.")
+        print(f"No checkpoint found at '{checkpoint_path}', using untrained model.")
     net.eval()
     return net
 
 
 if __name__ == "__main__":
-    os.makedirs(HUMAN_PGN_DIR, exist_ok=True)
-    os.makedirs(HUMAN_REPLAY_DIR, exist_ok=True)
+    parser = argparse.ArgumentParser(description="Play a local GUI game vs model.")
+    parser.add_argument("--device", type=str, default="cpu", help="cpu or cuda")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="checkpoint_latest.pt",
+        help="Model checkpoint path to load.",
+    )
+    parser.add_argument("--num_sims", type=int, default=50, help="MCTS simulations per model move.")
+    parser.add_argument("--play_as_black", action="store_true", help="Start game as Black.")
+    parser.add_argument(
+        "--save_training_samples",
+        action="store_true",
+        help="Save human-vs-model training shards to replay_human dir.",
+    )
+    parser.add_argument("--human_replay_dir", type=str, default=HUMAN_REPLAY_DIR)
+    parser.add_argument("--human_pgn_dir", type=str, default=HUMAN_PGN_DIR)
+    args = parser.parse_args()
 
-    device = "cpu"
-    net = load_model(device=device)
+    os.makedirs(args.human_pgn_dir, exist_ok=True)
+    os.makedirs(args.human_replay_dir, exist_ok=True)
 
-    app = PlayVsModel(net, device=device, num_sims=50)
+    net = load_model(device=args.device, checkpoint_path=args.checkpoint)
+
+    app = PlayVsModel(
+        net,
+        device=args.device,
+        num_sims=args.num_sims,
+        save_training_samples=args.save_training_samples,
+        human_replay_dir=args.human_replay_dir,
+        human_pgn_dir=args.human_pgn_dir,
+        start_as_black=args.play_as_black,
+    )
     app.mainloop()
