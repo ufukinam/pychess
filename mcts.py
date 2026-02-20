@@ -205,7 +205,8 @@ def mcts_run(
                 v = 0.0
             parent.N[action] += 1
             parent.sum_N += 1
-            parent.W[action] += v
+            # Edge statistics are stored from the parent player perspective.
+            parent.W[action] += -v
             v = -v  # switch perspective each ply
 
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import time
+import glob
 
 import numpy as np
 
@@ -148,6 +149,11 @@ def main() -> None:
         default=0,
         help="Optional cap on number of val shards (0 disables cap).",
     )
+    parser.add_argument(
+        "--clean_out_dir",
+        action="store_true",
+        help="If set, delete existing train_shard_*.npz / val_shard_*.npz in out_dir before writing.",
+    )
     args = parser.parse_args()
 
     val_ratio = float(min(0.9, max(0.0, args.val_ratio)))
@@ -169,6 +175,14 @@ def main() -> None:
         else None
     )
     has_any_cap = (train_cap_samples is not None) or (val_cap_samples is not None)
+
+    if args.clean_out_dir and os.path.isdir(args.out_dir):
+        stale = glob.glob(os.path.join(args.out_dir, "train_shard_*.npz"))
+        stale += glob.glob(os.path.join(args.out_dir, "val_shard_*.npz"))
+        for p in stale:
+            os.remove(p)
+        if stale:
+            print(f"Removed {len(stale)} existing shard file(s) from {args.out_dir}")
 
     seen = 0
     t0 = time.time()

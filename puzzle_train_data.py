@@ -18,6 +18,22 @@ def mask_illegal_logits(logits: torch.Tensor, legal_masks: torch.Tensor) -> torc
     return logits.masked_fill(~legal_masks, -1e9)
 
 
+def _filter_valid_targets(
+    x: torch.Tensor,
+    target_idx: torch.Tensor,
+    legal_masks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """
+    Keep only rows where the supervised target action is legal per mask.
+    Invalid rows can exist in stale/corrupt cache shards and would explode CE loss.
+    """
+    valid = legal_masks.gather(1, target_idx.unsqueeze(1)).squeeze(1).bool()
+    invalid_n = int((~valid).sum().item())
+    if invalid_n == 0:
+        return x, target_idx, legal_masks, 0
+    return x[valid], target_idx[valid], legal_masks[valid], invalid_n
+
+
 class PuzzleDataset(Dataset):
     def __init__(self, examples: list[PuzzleExample]):
         self.examples = examples
@@ -122,12 +138,17 @@ def train_one_epoch(
     net.train()
     total = 0
     loss_sum = 0.0
+    invalid_target_rows = 0
     total_batches = len(loader)
     t0 = time.time()
     for batch_idx, (x, target_idx, legal_masks) in enumerate(loader, start=1):
         x = x.to(device)
         target_idx = target_idx.to(device)
         legal_masks = legal_masks.to(device)
+        x, target_idx, legal_masks, invalid_n = _filter_valid_targets(x, target_idx, legal_masks)
+        invalid_target_rows += invalid_n
+        if x.size(0) == 0:
+            continue
         logits, _ = net(x)
         masked_logits = mask_illegal_logits(logits, legal_masks)
         loss = F.cross_entropy(
@@ -149,8 +170,10 @@ def train_one_epoch(
             print(
                 f"[Train] batch {batch_idx}/{total_batches} "
                 f"({100.0*batch_idx/max(1,total_batches):.1f}%) "
-                f"avg_loss={avg_loss:.4f} elapsed={elapsed:.1f}s"
+                f"avg_loss={avg_loss:.4f} invalid_targets={invalid_target_rows} elapsed={elapsed:.1f}s"
             )
+    if invalid_target_rows > 0:
+        print(f"[Train] skipped {invalid_target_rows} rows with illegal target labels")
     return loss_sum / max(1, total)
 
 
@@ -169,6 +192,7 @@ def train_one_epoch_from_shards(
     net.train()
     total = 0
     loss_sum = 0.0
+    invalid_target_rows = 0
     total_shards = len(shard_paths)
     epoch_t0 = time.time()
     for shard_idx, path in enumerate(shard_paths, start=1):
@@ -189,6 +213,10 @@ def train_one_epoch_from_shards(
             x = x.to(device)
             t = t.to(device)
             mask = mask.to(device)
+            x, t, mask, invalid_n = _filter_valid_targets(x, t, mask)
+            invalid_target_rows += invalid_n
+            if x.size(0) == 0:
+                continue
             logits, _ = net(x)
             masked_logits = mask_illegal_logits(logits, mask)
             loss = F.cross_entropy(
@@ -208,9 +236,11 @@ def train_one_epoch_from_shards(
                 elapsed = time.time() - epoch_t0
                 print(
                     f"[Train] shard {shard_idx}/{total_shards} batch {batch_idx}/{shard_batches} "
-                    f"avg_loss={avg_loss:.4f} elapsed={elapsed:.1f}s"
+                    f"avg_loss={avg_loss:.4f} invalid_targets={invalid_target_rows} elapsed={elapsed:.1f}s"
                 )
         print(
             f"[Train] shard {shard_idx}/{total_shards} done in {time.time()-shard_t0:.1f}s"
         )
+    if invalid_target_rows > 0:
+        print(f"[Train] skipped {invalid_target_rows} rows with illegal target labels")
     return loss_sum / max(1, total)

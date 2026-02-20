@@ -6,6 +6,7 @@ import chess
 
 from env import ChessEnv
 from mcts import Node, mcts_policy_and_action, reuse_root_after_action
+from selfplay import move_to_action
 
 
 def action_to_move(action: int) -> chess.Move:
@@ -48,6 +49,7 @@ def play_vs_random(
             mv = action_to_move(action)
             if mv not in board.legal_moves:
                 mv = np.random.choice(list(board.legal_moves))
+                action = move_to_action(mv)
         else:
             mv = np.random.choice(list(board.legal_moves))
 

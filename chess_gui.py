@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import sys
@@ -178,6 +179,30 @@ class ChessControlPanel(tk.Tk):
             True,
             "Normal: ON. ON = load puzzle checkpoint first if present. OFF = prioritize init checkpoint.",
         )
+        self.sp_iters = self._add_entry(
+            f,
+            "Iterations",
+            "5",
+            "Number of train/eval loops.",
+        )
+        self.sp_games_per_iter = self._add_entry(
+            f,
+            "Games per iter",
+            "40",
+            "Self-play games generated each iteration.",
+        )
+        self.sp_batch_size = self._add_entry(
+            f,
+            "Batch size",
+            "64",
+            "Optimization batch size.",
+        )
+        self.sp_train_batches = self._add_entry(
+            f,
+            "Train batches",
+            "32",
+            "Number of gradient updates per iteration.",
+        )
 
     def _build_puzzle_train_tab(self) -> None:
         f = self.tabs["Puzzle Train"]
@@ -330,6 +355,12 @@ class ChessControlPanel(tk.Tk):
             "0",
             "0 = unlimited. Positive cap keeps validation set bounded.",
         )
+        self.bc_clean = self._add_check(
+            f,
+            "Clean out dir before build",
+            True,
+            "ON removes old train/val shard files first to prevent stale data mixing with new cache builds.",
+        )
 
     def _build_generate_tab(self) -> None:
         f = self.tabs["Generate Puzzles"]
@@ -440,18 +471,23 @@ class ChessControlPanel(tk.Tk):
         )
 
     def run_selected_tab(self) -> None:
+        base = [sys.executable, "-u", "chess_interface.py"]
         tab_name = self.notebook.tab(self.notebook.select(), "text")
         if tab_name == "Self-Play Train":
             cmd = [
-                sys.executable, "chess_interface.py", "train-selfplay",
+                *base, "train-selfplay",
                 "--init_checkpoint", self.sp_init_ckpt.get(),
                 "--puzzle_checkpoint", self.sp_puzzle_ckpt.get(),
+                "--iters", self.sp_iters.get(),
+                "--games_per_iter", self.sp_games_per_iter.get(),
+                "--batch_size", self.sp_batch_size.get(),
+                "--train_batches", self.sp_train_batches.get(),
             ]
             if self.sp_prefer_puzzle.get():
                 cmd.append("--prefer_puzzle_init")
         elif tab_name == "Puzzle Train":
             cmd = [
-                sys.executable, "chess_interface.py", "train-puzzles",
+                *base, "train-puzzles",
                 "--limit", self.pt_limit.get(),
                 "--batch_size", self.pt_batch.get(),
                 "--epochs", self.pt_epochs.get(),
@@ -474,7 +510,7 @@ class ChessControlPanel(tk.Tk):
                 return
         elif tab_name == "Build Puzzle Cache":
             cmd = [
-                sys.executable, "chess_interface.py", "build-puzzle-cache",
+                *base, "build-puzzle-cache",
                 "--puzzles_csv", self.bc_csv.get(),
                 "--out_dir", self.bc_out.get(),
                 "--limit", self.bc_limit.get(),
@@ -484,16 +520,18 @@ class ChessControlPanel(tk.Tk):
                 "--max_train_shards", self.bc_max_train.get(),
                 "--max_val_shards", self.bc_max_val.get(),
             ]
+            if self.bc_clean.get():
+                cmd += ["--clean_out_dir"]
         elif tab_name == "Generate Puzzles":
             cmd = [
-                sys.executable, "chess_interface.py", "generate-puzzles",
+                *base, "generate-puzzles",
                 "--out", self.gp_out.get(),
                 "--count", self.gp_count.get(),
                 "--seed", self.gp_seed.get(),
             ]
         elif tab_name == "Play vs Model":
             cmd = [
-                sys.executable, "chess_interface.py", "play-vs-model",
+                *base, "play-vs-model",
                 "--device", self.pm_device.get(),
                 "--checkpoint", self.pm_ckpt.get(),
                 "--num_sims", self.pm_sims.get(),
@@ -506,7 +544,7 @@ class ChessControlPanel(tk.Tk):
                 cmd.append("--save_training_samples")
         else:  # PGN Viewer
             cmd = [
-                sys.executable, "chess_interface.py", "pgn-viewer",
+                *base, "pgn-viewer",
                 "--games_dir", self.pv_games_dir.get(),
             ]
             if self.pv_pgn_path.get().strip():
@@ -523,12 +561,21 @@ class ChessControlPanel(tk.Tk):
         self._append_log("\n[Run] " + " ".join(cmd) + "\n")
         self.status_var.set("Running...")
 
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+
+        creationflags = 0
+        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+
         self.proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
+            creationflags=creationflags,
         )
         t = threading.Thread(target=self._reader_thread, daemon=True)
         t.start()
@@ -555,8 +602,17 @@ class ChessControlPanel(tk.Tk):
 
     def stop_process(self) -> None:
         if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            self._append_log("[Process termination requested]\n")
+            pid = self.proc.pid
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                self.proc.terminate()
+            self._append_log(f"[Process termination requested for PID {pid}]\n")
         else:
             self._append_log("[No running process]\n")
 
@@ -564,8 +620,12 @@ class ChessControlPanel(tk.Tk):
         self.log.delete("1.0", "end")
 
     def _append_log(self, text: str) -> None:
+        # Auto-follow only if user is already near bottom; keep manual history browsing stable.
+        y0, y1 = self.log.yview()
+        at_bottom = y1 >= 0.995
         self.log.insert("end", text)
-        self.log.see("end")
+        if at_bottom:
+            self.log.see("end")
 
 
 if __name__ == "__main__":

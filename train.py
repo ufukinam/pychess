@@ -34,6 +34,10 @@ def main():
         action="store_true",
         help="If set, prefer puzzle checkpoint over init checkpoint when available.",
     )
+    parser.add_argument("--iters", type=int, default=5, help="Training iterations.")
+    parser.add_argument("--games_per_iter", type=int, default=40, help="Self-play games per iteration.")
+    parser.add_argument("--batch_size", type=int, default=64, help="Training batch size.")
+    parser.add_argument("--train_batches", type=int, default=32, help="Gradient batches per iteration.")
     args = parser.parse_args()
 
     # Optional CPU threading tweak (sometimes speeds up, sometimes slows down)
@@ -53,11 +57,21 @@ def main():
 
     # Resume model: optionally transfer from puzzle-pretrained checkpoint.
     loaded_ckpt = None
+
+    def _load_checkpoint(path: str) -> None:
+        payload = torch.load(path, map_location=device)
+        if isinstance(payload, dict) and "model_state_dict" in payload:
+            net.load_state_dict(payload["model_state_dict"])
+            if "optimizer_state_dict" in payload:
+                opt.load_state_dict(payload["optimizer_state_dict"])
+        else:
+            # Backward-compat: old checkpoints with weights-only state_dict.
+            net.load_state_dict(payload)
     if args.prefer_puzzle_init and args.puzzle_checkpoint and os.path.exists(args.puzzle_checkpoint):
-        net.load_state_dict(torch.load(args.puzzle_checkpoint, map_location=device))
+        _load_checkpoint(args.puzzle_checkpoint)
         loaded_ckpt = args.puzzle_checkpoint
     elif args.init_checkpoint and os.path.exists(args.init_checkpoint):
-        net.load_state_dict(torch.load(args.init_checkpoint, map_location=device))
+        _load_checkpoint(args.init_checkpoint)
         loaded_ckpt = args.init_checkpoint
 
     if loaded_ckpt:
@@ -81,10 +95,10 @@ def main():
     if loaded > 0:
         print(f"Loaded {loaded} replay samples from ./replay")
 
-    iters = 5
-    games_per_iter = 40
-    batch_size = 64
-    train_batches = 32
+    iters = int(args.iters)
+    games_per_iter = int(args.games_per_iter)
+    batch_size = int(args.batch_size)
+    train_batches = int(args.train_batches)
 
     # Bootstrap only if buffer is empty
     if len(rb) == 0:
@@ -203,9 +217,14 @@ def main():
             writer.add_scalar("train/value_loss", avg[2], it)
 
             # Checkpoints
-            torch.save(net.state_dict(), "checkpoint_latest.pt")
+            checkpoint_payload = {
+                "model_state_dict": net.state_dict(),
+                "optimizer_state_dict": opt.state_dict(),
+                "iter": it,
+            }
+            torch.save(checkpoint_payload, "checkpoint_latest.pt")
             if it % 10 == 0:
-                torch.save(net.state_dict(), f"checkpoint_{it:03d}.pt")
+                torch.save(checkpoint_payload, f"checkpoint_{it:03d}.pt")
                 print("Saved checkpoint.")
 
             # ---- Evaluation vs random ----

@@ -12,13 +12,18 @@ def _run(cmd: list[str]) -> int:
 
 
 def _py(script: str) -> list[str]:
-    return [sys.executable, script]
+    # Unbuffered Python so GUI log streaming remains responsive.
+    return [sys.executable, "-u", script]
 
 
 def cmd_train_selfplay(args: argparse.Namespace) -> int:
     cmd = _py("train.py")
     cmd += ["--init_checkpoint", args.init_checkpoint]
     cmd += ["--puzzle_checkpoint", args.puzzle_checkpoint]
+    cmd += ["--iters", str(args.iters)]
+    cmd += ["--games_per_iter", str(args.games_per_iter)]
+    cmd += ["--batch_size", str(args.batch_size)]
+    cmd += ["--train_batches", str(args.train_batches)]
     if args.prefer_puzzle_init:
         cmd.append("--prefer_puzzle_init")
     return _run(cmd)
@@ -55,6 +60,8 @@ def cmd_build_puzzle_cache(args: argparse.Namespace) -> int:
     cmd += ["--shard_size", str(args.shard_size)]
     cmd += ["--max_train_shards", str(args.max_train_shards)]
     cmd += ["--max_val_shards", str(args.max_val_shards)]
+    if args.clean_out_dir:
+        cmd += ["--clean_out_dir"]
     return _run(cmd)
 
 
@@ -121,6 +128,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Prefer puzzle checkpoint over init checkpoint when available.",
     )
+    sp.add_argument("--iters", type=int, default=5, help="Training iterations.")
+    sp.add_argument("--games_per_iter", type=int, default=40, help="Self-play games per iteration.")
+    sp.add_argument("--batch_size", type=int, default=64, help="Training batch size.")
+    sp.add_argument("--train_batches", type=int, default=32, help="Gradient batches per iteration.")
     sp.set_defaults(func=cmd_train_selfplay)
 
     sp = sub.add_parser(
@@ -165,6 +176,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--shard_size", type=int, default=2048, help="Samples per NPZ shard.")
     sp.add_argument("--max_train_shards", type=int, default=0, help="Cap train shard count (0 = unlimited).")
     sp.add_argument("--max_val_shards", type=int, default=0, help="Cap val shard count (0 = unlimited).")
+    sp.add_argument(
+        "--clean_out_dir",
+        action="store_true",
+        help="Delete existing shard files in out_dir before writing new shards.",
+    )
     sp.set_defaults(func=cmd_build_puzzle_cache)
 
     sp = sub.add_parser(

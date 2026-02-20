@@ -57,7 +57,7 @@ def save_pgn_from_moves(moves: list[chess.Move], result_str: str, out_dir: str, 
         board.push(mv)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(out_dir, f"human_vs_net_{ts}.pgn")
+    path = os.path.join(out_dir, f"human_vs_net_{ts}_{np.random.randint(100000):05d}.pgn")
     with open(path, "w", encoding="utf-8") as f:
         print(game, file=f, end="\n\n")
     return path
@@ -70,7 +70,7 @@ def save_human_shard(samples, out_dir: str):
     vs = np.array([v for (s, pi, v) in samples], dtype=np.float32)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(out_dir, f"human_shard_{ts}.npz")
+    path = os.path.join(out_dir, f"human_shard_{ts}_{np.random.randint(100000):05d}.npz")
     np.savez_compressed(path, states=states, pis=pis, vs=vs)
     return path
 

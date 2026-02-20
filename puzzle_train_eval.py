@@ -178,9 +178,11 @@ def save_best_validation_pgns(
     with torch.inference_mode():
         for ex in val_examples:
             x = torch.from_numpy(ex.state).unsqueeze(0).to(device)
+            legal = torch.from_numpy(ex.legal_mask.astype(np.bool_)).unsqueeze(0).to(device)
             logits, _ = net(x)
-            probs = torch.softmax(logits, dim=1).squeeze(0)
-            pred = int(torch.argmax(probs).item())
+            masked_logits = mask_illegal_logits(logits, legal)
+            probs = torch.softmax(masked_logits, dim=1).squeeze(0)
+            pred = int(torch.argmax(masked_logits, dim=1).item())
             if pred == ex.target_index:
                 solved.append((float(probs[ex.target_index].item()), ex))
 
