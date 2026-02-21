@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+"""
+Encoding helpers shared by training, search, and gameplay code.
+
+Why this file exists:
+- Neural networks work with numbers/tensors, not raw chess objects.
+- MCTS also needs a fixed-size action space to store visit counts and priors.
+
+External library usage:
+- `python-chess` provides legal move generation and board metadata.
+- `numpy` is used to build fast numeric arrays for model input.
+"""
+
 import numpy as np
 import chess
 
@@ -17,7 +29,12 @@ IDX_TO_PROMO = {v: k for k, v in PROMO_TO_IDX.items()}
 
 
 def move_to_index(move: chess.Move) -> int:
-    """Map python-chess Move -> [0, ACTION_SIZE)."""
+    """
+    Map a `python-chess` move to one integer in `[0, ACTION_SIZE)`.
+
+    Why: the policy head outputs one logit per action index, so moves must be
+    converted into stable integer ids.
+    """
     frm = move.from_square
     to = move.to_square
     promo = PROMO_TO_IDX.get(move.promotion, 0)
@@ -25,7 +42,7 @@ def move_to_index(move: chess.Move) -> int:
 
 
 def index_to_move(index: int) -> tuple[int, int, int]:
-    """Index -> (from_square, to_square, promo_idx)."""
+    """Inverse of `move_to_index` for debugging and action decoding."""
     x = index // 5
     promo_idx = index % 5
     frm = x // 64
@@ -34,7 +51,12 @@ def index_to_move(index: int) -> tuple[int, int, int]:
 
 
 def legal_mask(board: chess.Board) -> np.ndarray:
-    """Boolean mask over ACTION_SIZE. True where action is legal."""
+    """
+    Boolean vector over all actions where `True` marks legal actions.
+
+    Why: the model predicts over a global action space, but only a subset is
+    legal in a given position. Training and inference mask the rest.
+    """
     mask = np.zeros((ACTION_SIZE,), dtype=np.bool_)
     for mv in board.legal_moves:
         mask[move_to_index(mv)] = True
@@ -49,7 +71,11 @@ def board_to_tensor(board: chess.Board) -> np.ndarray:
       12    : side-to-move (1 if white to move else 0)
       13-16 : castling rights (WK, WQ, BK, BQ)
       17    : en-passant file (one-hot across file; plane has 1s on that file)
-    Output shape: (18, 8, 8)
+    Output shape: `(18, 8, 8)`.
+
+    Why these planes:
+    - piece planes describe *what is on each square*.
+    - side/castling/en-passant planes describe *state needed for legal play*.
     """
     planes = np.zeros((18, 8, 8), dtype=np.float32)
 

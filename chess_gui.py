@@ -249,6 +249,48 @@ class ChessControlPanel(tk.Tk):
             "3e-4",
             "Normal: 1e-4 to 1e-3. Higher learns faster but can diverge; lower is safer but slower.",
         )
+        self.pt_workers = self._add_entry(
+            f,
+            "Data workers",
+            "0",
+            "CSV mode only. 0 = main process. Try 2-8 if CSV loading is slow.",
+        )
+        self.pt_torch_threads = self._add_entry(
+            f,
+            "Torch CPU threads",
+            "0",
+            "0 = backend default. On CPU-only training, try cpu_count-1.",
+        )
+        self.pt_auto_tune = self._add_check(
+            f,
+            "Auto tune CPU",
+            False,
+            "Benchmark several batch/thread settings, pick fastest, then train with it.",
+        )
+        self.pt_tune_batches = self._add_entry(
+            f,
+            "Tune batch sizes",
+            "128,256,512",
+            "Comma-separated list used when Auto tune CPU is ON.",
+        )
+        self.pt_tune_threads = self._add_entry(
+            f,
+            "Tune threads",
+            "4,6,8",
+            "Comma-separated thread counts used when Auto tune CPU is ON.",
+        )
+        self.pt_tune_steps = self._add_entry(
+            f,
+            "Tune max batches",
+            "120",
+            "Benchmark batches per config (higher = more accurate, slower startup).",
+        )
+        self.pt_tune_only = self._add_check(
+            f,
+            "Tune only",
+            False,
+            "ON runs benchmark and exits without full training.",
+        )
         self.pt_val_ratio = self._add_entry(
             f,
             "Val ratio",
@@ -354,6 +396,18 @@ class ChessControlPanel(tk.Tk):
             "Max val shards",
             "0",
             "0 = unlimited. Positive cap keeps validation set bounded.",
+        )
+        self.bc_workers = self._add_entry(
+            f,
+            "Workers",
+            "0",
+            "0 = auto (cpu_count-1). Use 1 for old single-process behavior.",
+        )
+        self.bc_compress = self._add_check(
+            f,
+            "Use compressed NPZ",
+            True,
+            "ON = smaller files, slower build. OFF = larger files, much faster build.",
         )
         self.bc_clean = self._add_check(
             f,
@@ -492,6 +546,11 @@ class ChessControlPanel(tk.Tk):
                 "--batch_size", self.pt_batch.get(),
                 "--epochs", self.pt_epochs.get(),
                 "--lr", self.pt_lr.get(),
+                "--num_workers", self.pt_workers.get(),
+                "--torch_threads", self.pt_torch_threads.get(),
+                "--tune_batch_sizes", self.pt_tune_batches.get(),
+                "--tune_torch_threads", self.pt_tune_threads.get(),
+                "--tune_max_batches", self.pt_tune_steps.get(),
                 "--val_ratio", self.pt_val_ratio.get(),
                 "--seed", self.pt_seed.get(),
                 "--label_smoothing", self.pt_label_smoothing.get(),
@@ -501,6 +560,10 @@ class ChessControlPanel(tk.Tk):
                 "--progress_every_batches", self.pt_progress.get(),
                 "--resume_checkpoint", self.pt_resume.get(),
             ]
+            if self.pt_auto_tune.get():
+                cmd.append("--auto_tune_cpu")
+            if self.pt_tune_only.get():
+                cmd.append("--tune_only")
             if self.pt_cache_dir.get().strip():
                 cmd += ["--cache_dir", self.pt_cache_dir.get().strip()]
             elif self.pt_puzzles_csv.get().strip():
@@ -519,6 +582,8 @@ class ChessControlPanel(tk.Tk):
                 "--shard_size", self.bc_shard_size.get(),
                 "--max_train_shards", self.bc_max_train.get(),
                 "--max_val_shards", self.bc_max_val.get(),
+                "--workers", self.bc_workers.get(),
+                "--compression", ("compressed" if self.bc_compress.get() else "none"),
             ]
             if self.bc_clean.get():
                 cmd += ["--clean_out_dir"]

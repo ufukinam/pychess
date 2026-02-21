@@ -1,6 +1,14 @@
 # eval.py  (NEW)
 from __future__ import annotations
 
+"""
+Lightweight evaluation utilities.
+
+Current benchmark:
+- model vs random-move opponent, alternating colors.
+This is a weak baseline but useful for sanity-checking learning progress.
+"""
+
 import numpy as np
 import chess
 
@@ -10,6 +18,7 @@ from selfplay import move_to_action
 
 
 def action_to_move(action: int) -> chess.Move:
+    """Decode model action index into a chess move."""
     frm = action // (64 * 5)
     to = (action // 5) % 64
     promo_idx = action % 5

@@ -39,6 +39,15 @@ def cmd_train_puzzles(args: argparse.Namespace) -> int:
     cmd += ["--batch_size", str(args.batch_size)]
     cmd += ["--epochs", str(args.epochs)]
     cmd += ["--lr", str(args.lr)]
+    cmd += ["--num_workers", str(args.num_workers)]
+    cmd += ["--torch_threads", str(args.torch_threads)]
+    if args.auto_tune_cpu:
+        cmd += ["--auto_tune_cpu"]
+    cmd += ["--tune_batch_sizes", str(args.tune_batch_sizes)]
+    cmd += ["--tune_torch_threads", str(args.tune_torch_threads)]
+    cmd += ["--tune_max_batches", str(args.tune_max_batches)]
+    if args.tune_only:
+        cmd += ["--tune_only"]
     cmd += ["--val_ratio", str(args.val_ratio)]
     cmd += ["--seed", str(args.seed)]
     cmd += ["--label_smoothing", str(args.label_smoothing)]
@@ -60,6 +69,8 @@ def cmd_build_puzzle_cache(args: argparse.Namespace) -> int:
     cmd += ["--shard_size", str(args.shard_size)]
     cmd += ["--max_train_shards", str(args.max_train_shards)]
     cmd += ["--max_val_shards", str(args.max_val_shards)]
+    cmd += ["--workers", str(args.workers)]
+    cmd += ["--compression", str(args.compression)]
     if args.clean_out_dir:
         cmd += ["--clean_out_dir"]
     return _run(cmd)
@@ -148,6 +159,46 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--batch_size", type=int, default=128, help="Training batch size.")
     sp.add_argument("--epochs", type=int, default=5, help="Number of puzzle epochs.")
     sp.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
+    sp.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="DataLoader workers for CSV-mode puzzle training.",
+    )
+    sp.add_argument(
+        "--torch_threads",
+        type=int,
+        default=0,
+        help="Torch intra-op CPU threads for puzzle training (0 = backend default).",
+    )
+    sp.add_argument(
+        "--auto_tune_cpu",
+        action="store_true",
+        help="Benchmark (batch_size, torch_threads) pairs and pick the fastest.",
+    )
+    sp.add_argument(
+        "--tune_batch_sizes",
+        type=str,
+        default="128,256,512",
+        help="Comma-separated batch sizes for auto-tune benchmark.",
+    )
+    sp.add_argument(
+        "--tune_torch_threads",
+        type=str,
+        default="4,6,8",
+        help="Comma-separated torch thread counts for auto-tune benchmark.",
+    )
+    sp.add_argument(
+        "--tune_max_batches",
+        type=int,
+        default=120,
+        help="Number of benchmark batches per config.",
+    )
+    sp.add_argument(
+        "--tune_only",
+        action="store_true",
+        help="Run benchmark and exit without normal training.",
+    )
     sp.add_argument("--val_ratio", type=float, default=0.1, help="Validation split ratio (CSV mode only).")
     sp.add_argument("--seed", type=int, default=42, help="Random seed.")
     sp.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing for cross entropy.")
@@ -176,6 +227,19 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--shard_size", type=int, default=2048, help="Samples per NPZ shard.")
     sp.add_argument("--max_train_shards", type=int, default=0, help="Cap train shard count (0 = unlimited).")
     sp.add_argument("--max_val_shards", type=int, default=0, help="Cap val shard count (0 = unlimited).")
+    sp.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Worker processes for CSV conversion (0 = auto, cpu_count-1).",
+    )
+    sp.add_argument(
+        "--compression",
+        type=str,
+        choices=("compressed", "none"),
+        default="compressed",
+        help="Shard compression mode. 'none' is faster and uses more disk.",
+    )
     sp.add_argument(
         "--clean_out_dir",
         action="store_true",

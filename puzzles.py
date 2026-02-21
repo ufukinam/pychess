@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""
+Puzzle CSV parsing and train/validation split logic.
+
+External library usage:
+- `csv`: reads puzzle rows from disk.
+- `python-chess`: validates FEN positions and UCI moves.
+- `numpy`: stores encoded state/mask arrays in examples.
+"""
+
 from dataclasses import dataclass
 from typing import Iterable
 import csv
@@ -13,6 +22,7 @@ from encode import ACTION_SIZE, board_to_tensor, legal_mask, move_to_index
 
 @dataclass(frozen=True)
 class PuzzleExample:
+    """One supervised training row for "best move from this position"."""
     state: np.ndarray
     target_index: int
     legal_mask: np.ndarray
@@ -23,6 +33,7 @@ class PuzzleExample:
 
 
 def _extract_best_move_uci(row: dict[str, str]) -> str | None:
+    """Read first move from Lichess-style `Moves` column."""
     moves = (row.get("Moves") or row.get("moves") or "").strip()
     if not moves:
         return None
@@ -31,6 +42,7 @@ def _extract_best_move_uci(row: dict[str, str]) -> str | None:
 
 
 def _extract_fen(row: dict[str, str]) -> str | None:
+    """Read FEN from mixed-case CSV headers (`FEN` or `fen`)."""
     fen = (row.get("FEN") or row.get("fen") or "").strip()
     return fen or None
 
@@ -91,12 +103,18 @@ def iter_puzzle_examples(csv_path: str, limit: int | None = None) -> Iterable[Pu
 
 
 def load_puzzles(csv_path: str, limit: int | None = None) -> list[PuzzleExample]:
+    """Materialize iterator into a list for simpler downstream use."""
     return list(iter_puzzle_examples(csv_path, limit=limit))
 
 
 def split_train_val(
     examples: list[PuzzleExample], val_ratio: float = 0.1, seed: int = 42
 ) -> tuple[list[PuzzleExample], list[PuzzleExample]]:
+    """
+    Split examples by grouped puzzle key to avoid train/val leakage.
+
+    Why grouping: duplicate rows of the same puzzle should not be in both splits.
+    """
     if not examples:
         return [], []
 

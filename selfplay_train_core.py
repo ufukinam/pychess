@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""
+Core replay-buffer and gradient-step utilities for self-play training.
+
+External library usage:
+- `collections.deque`: fixed-size replay memory.
+- `random.sample`: uniform sampling from replay buffer.
+- `numpy`: batch assembly from stored samples.
+- `torch` + `torch.nn.functional`: forward pass and losses.
+"""
+
 import random
 from collections import deque
 
@@ -9,6 +19,7 @@ import torch.nn.functional as F
 
 
 class ReplayBuffer:
+    """Stores `(state, policy_target, value_target)` tuples from self-play."""
     def __init__(self, maxlen: int = 50000):
         self.buf = deque(maxlen=maxlen)
 
@@ -27,6 +38,11 @@ class ReplayBuffer:
 
 
 def train_step(net, opt, states, target_pi, target_v, device="cpu"):
+    """
+    One optimization step on a sampled replay batch.
+
+    Loss = policy cross-entropy (against MCTS policy target) + value MSE.
+    """
     net.train()
     x = torch.from_numpy(states).to(device)
     pi_t = torch.from_numpy(target_pi).to(device)

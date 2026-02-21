@@ -15,6 +15,14 @@ All major workflows can be controlled from one interface:
 If you prefer a visual UI, use:
 `chess_gui.py`
 
+## Learning Path (Comprehensive)
+
+If you want to learn this project from zero (Why -> How -> Code), use:
+
+- `docs/TEACHING_PLAN.md` (full curriculum, module by module)
+- `docs/WORKBOOK.md` (hands-on checklist and acceptance gates)
+- `docs/BEGINNER_ML_GUIDE.md` (plain-English explanation of ML/DL concepts and library usage in this codebase)
+
 ## Quick Start
 
 Run the unified interface help:

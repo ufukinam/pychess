@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""
+Puzzle-data loading and puzzle-policy training helpers.
+
+External library usage:
+- `numpy`: numeric arrays, shuffling, NPZ serialization helpers.
+- `torch`: tensors, model execution, and optimization.
+- `torch.utils.data.Dataset/DataLoader`: mini-batch input pipeline.
+- `torch.nn.functional.cross_entropy`: supervised classification loss.
+"""
+
 import glob
 import os
 import time
@@ -15,6 +25,7 @@ from puzzles import PuzzleExample
 
 
 def mask_illegal_logits(logits: torch.Tensor, legal_masks: torch.Tensor) -> torch.Tensor:
+    """Mask illegal actions so loss/argmax only consider legal moves."""
     return logits.masked_fill(~legal_masks, -1e9)
 
 
@@ -35,6 +46,7 @@ def _filter_valid_targets(
 
 
 class PuzzleDataset(Dataset):
+    """Simple Dataset over in-memory `PuzzleExample` objects."""
     def __init__(self, examples: list[PuzzleExample]):
         self.examples = examples
 
@@ -46,11 +58,12 @@ class PuzzleDataset(Dataset):
         return (
             torch.from_numpy(ex.state).float(),
             torch.tensor(ex.target_index, dtype=torch.long),
-            torch.from_numpy(ex.legal_mask.astype(np.bool_)),
+            torch.from_numpy(ex.legal_mask),
         )
 
 
 class CachedPuzzleDataset(Dataset):
+    """Dataset view over preloaded shard arrays."""
     def __init__(self, states: np.ndarray, target_idx: np.ndarray, legal_masks: np.ndarray):
         self.states = states
         self.target_idx = target_idx
@@ -63,11 +76,12 @@ class CachedPuzzleDataset(Dataset):
         return (
             torch.from_numpy(self.states[idx]).float(),
             torch.tensor(int(self.target_idx[idx]), dtype=torch.long),
-            torch.from_numpy(self.legal_masks[idx].astype(np.bool_)),
+            torch.from_numpy(self.legal_masks[idx]),
         )
 
 
 def list_cache_shards(cache_dir: str, split: str) -> list[str]:
+    """Return sorted shard paths for a split (`train` or `val`)."""
     pattern = os.path.join(cache_dir, f"{split}_shard_*.npz")
     return sorted(glob.glob(pattern))
 
@@ -100,6 +114,7 @@ def filter_valid_shards(
 
 
 def load_cached_shard(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load one cached shard and unpack its packed legality mask bits."""
     data = np.load(path)
     states = data["states"].astype(np.float32, copy=False)
     target_idx = data["target_idx"].astype(np.int64, copy=False)
@@ -135,6 +150,7 @@ def train_one_epoch(
     label_smoothing: float = 0.0,
     progress_every_batches: int = 0,
 ) -> float:
+    """Train for one epoch using a DataLoader (CSV/in-memory path)."""
     net.train()
     total = 0
     loss_sum = 0.0
@@ -186,6 +202,7 @@ def train_one_epoch_from_shards(
     label_smoothing: float = 0.0,
     progress_every_batches: int = 0,
 ) -> float:
+    """Train for one epoch by streaming batches from NPZ shards."""
     if not shard_paths:
         return 0.0
 
@@ -195,24 +212,26 @@ def train_one_epoch_from_shards(
     invalid_target_rows = 0
     total_shards = len(shard_paths)
     epoch_t0 = time.time()
+    bs = max(1, int(batch_size))
+    total_load_s = 0.0
+    total_train_s = 0.0
     for shard_idx, path in enumerate(shard_paths, start=1):
+        load_t0 = time.time()
         states, target_idx, legal_masks = load_cached_shard(path)
-        loader = DataLoader(
-            CachedPuzzleDataset(states, target_idx, legal_masks),
-            batch_size=batch_size,
-            shuffle=True,
-        )
+        total_load_s += time.time() - load_t0
         shard_samples = int(states.shape[0])
-        shard_batches = len(loader)
+        shard_batches = max(1, (shard_samples + bs - 1) // bs)
+        order = np.random.permutation(shard_samples)
         shard_t0 = time.time()
         print(
             f"[Train] shard {shard_idx}/{total_shards} "
             f"samples={shard_samples} batches={shard_batches}"
         )
-        for batch_idx, (x, t, mask) in enumerate(loader, start=1):
-            x = x.to(device)
-            t = t.to(device)
-            mask = mask.to(device)
+        for batch_idx, start in enumerate(range(0, shard_samples, bs), start=1):
+            idx = order[start : start + bs]
+            x = torch.from_numpy(states[idx]).float().to(device)
+            t = torch.from_numpy(target_idx[idx]).long().to(device)
+            mask = torch.from_numpy(legal_masks[idx]).to(device)
             x, t, mask, invalid_n = _filter_valid_targets(x, t, mask)
             invalid_target_rows += invalid_n
             if x.size(0) == 0:
@@ -241,6 +260,11 @@ def train_one_epoch_from_shards(
         print(
             f"[Train] shard {shard_idx}/{total_shards} done in {time.time()-shard_t0:.1f}s"
         )
+        total_train_s += time.time() - shard_t0
     if invalid_target_rows > 0:
         print(f"[Train] skipped {invalid_target_rows} rows with illegal target labels")
+    print(
+        f"[TrainTiming] total_load_s={total_load_s:.2f} "
+        f"total_train_s={total_train_s:.2f} total_epoch_s={time.time()-epoch_t0:.2f}"
+    )
     return loss_sum / max(1, total)

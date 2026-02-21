@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""
+Main self-play reinforcement learning loop.
+
+High-level iteration:
+1) Generate self-play games with MCTS.
+2) Store samples in replay buffer.
+3) Train policy+value net on replay mini-batches.
+4) Periodically evaluate vs random baseline and checkpoint.
+"""
+
 import argparse
 import os
 from collections import Counter
@@ -16,6 +26,7 @@ from eval import eval_net_vs_random
 
 
 def main():
+    """CLI entry point for self-play training."""
     parser = argparse.ArgumentParser(description="Self-play training loop.")
     parser.add_argument(
         "--init_checkpoint",

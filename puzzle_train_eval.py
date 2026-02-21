@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 
 from net import AlphaZeroNet
 from puzzle_train_data import (
-    CachedPuzzleDataset,
     load_cached_shard,
     load_cached_val_shard_with_meta,
     mask_illegal_logits,
@@ -105,17 +104,15 @@ def evaluate_puzzle_validation_from_shards(
 
     with torch.inference_mode():
         total_shards = len(shard_paths)
+        bs = max(1, int(batch_size))
         for shard_idx, path in enumerate(shard_paths, start=1):
             states, target_idx, legal_masks = load_cached_shard(path)
-            loader = DataLoader(
-                CachedPuzzleDataset(states, target_idx, legal_masks),
-                batch_size=batch_size,
-                shuffle=False,
-            )
-            for x, t, mask in loader:
-                x = x.to(device)
-                t = t.to(device)
-                mask = mask.to(device)
+            shard_n = int(states.shape[0])
+            for start in range(0, shard_n, bs):
+                end = start + bs
+                x = torch.from_numpy(states[start:end]).float().to(device)
+                t = torch.from_numpy(target_idx[start:end]).long().to(device)
+                mask = torch.from_numpy(legal_masks[start:end]).to(device)
 
                 logits, _ = net(x)
                 masked_logits = mask_illegal_logits(logits, mask)

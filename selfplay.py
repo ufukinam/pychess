@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""
+Self-play game generation for reinforcement learning data.
+
+Why this module matters:
+- Produces `(state, improved_policy, value_target)` training samples.
+- Encodes extra training-time anti-loop and shaping heuristics to reduce
+  degenerate draw behavior in early training.
+"""
+
 import os
 import time
 import numpy as np
@@ -61,6 +70,7 @@ def _exchange_delta_for_mover(board: chess.Board, move: chess.Move) -> int:
 
 
 def save_pgn(moves: list[chess.Move], result_str: str, out_dir: str, tags: dict | None = None) -> str:
+    """Save one self-play game as PGN with optional debug/training tags."""
     os.makedirs(out_dir, exist_ok=True)
 
     game = chess.pgn.Game()
@@ -121,6 +131,14 @@ def play_self_game(
     pgn_dir: str | None = "games",
     verbose: bool = False,
 ):
+    """
+    Play one net-vs-net game and return training samples + stats.
+
+    Returns:
+    - samples: list of `(state, pi, value)` tuples for replay
+    - stats: game metadata useful for monitoring behavior
+    - pgn_path: saved PGN file path if enabled
+    """
     # ---- Anti-draw / anti-loop settings ----
     DRAW_PENALTY = -0.12          # stronger than -0.05 (tune -0.08..-0.20)
     STOP_ON_THREEFOLD = True
