@@ -294,8 +294,6 @@ def main() -> None:
         if int(args.max_val_shards) > 0
         else None
     )
-    has_any_cap = (train_cap_samples is not None) or (val_cap_samples is not None)
-
     if args.clean_out_dir and os.path.isdir(args.out_dir):
         stale = glob.glob(os.path.join(args.out_dir, "train_shard_*.npz"))
         stale += glob.glob(os.path.join(args.out_dir, "val_shard_*.npz"))
@@ -333,7 +331,10 @@ def main() -> None:
 
         train_full = _cap_reached(train_cap_samples, train_writer)
         val_full = _cap_reached(val_cap_samples, val_writer)
-        if has_any_cap and (train_cap_samples is None or train_full) and (val_cap_samples is None or val_full):
+        # Stop only when every capped split is full; uncapped splits are not "satisfied".
+        train_capped_full = train_cap_samples is not None and train_full
+        val_capped_full = val_cap_samples is not None and val_full
+        if train_capped_full and val_capped_full:
             print("Reached shard caps; stopping early.")
             return True
         return False
