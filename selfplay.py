@@ -130,6 +130,19 @@ def play_self_game(
     device: str = "cpu",
     pgn_dir: str | None = "games",
     verbose: bool = False,
+    draw_penalty: float = 0.0,
+    stop_on_threefold: bool = True,
+    no_progress_limit: int = 30,
+    no_progress_penalty: float = 0.0,
+    repeat2_penalty: float = 0.0,
+    stop_on_repeat2: bool = False,
+    temp_floor: float = 0.10,
+    use_material_shaping: bool = False,
+    material_scale: float = 0.0,
+    exchange_scale: float = 0.0,
+    early_sims: int | None = None,
+    early_plies: int = 16,
+    late_sims: int | None = None,
 ):
     """
     Play one net-vs-net game and return training samples + stats.
@@ -139,26 +152,10 @@ def play_self_game(
     - stats: game metadata useful for monitoring behavior
     - pgn_path: saved PGN file path if enabled
     """
-    # ---- Anti-draw / anti-loop settings ----
-    DRAW_PENALTY = -0.12          # stronger than -0.05 (tune -0.08..-0.20)
-    STOP_ON_THREEFOLD = True
-
-    NO_PROGRESS_LIMIT = 30        # halfmoves without pawn move or capture
-    NO_PROGRESS_PENALTY = -0.30   # punish stalling harder than draw
-
-    REPEAT2_PENALTY = -0.15       # mild penalty: discourage loops without dominating objective
-    STOP_ON_REPEAT2 = False       # avoid collapsing training into short repeated draws
-    TEMP_FLOOR = 0.10             # lower randomness after opening
-
-    # ---- Make "take pieces" learnable ----
-    USE_MATERIAL_SHAPING = True
-    MATERIAL_SCALE = 0.02         # 0.01..0.05
-    EXCHANGE_SCALE = 0.01         # reward favorable exchanges
-
     # ---- MCTS schedule ----
-    EARLY_SIMS = max(128, int(num_sims))
-    EARLY_PLIES = 16
-    LATE_SIMS = max(64, int(num_sims // 2))
+    EARLY_SIMS = int(early_sims) if early_sims is not None else int(num_sims)
+    EARLY_PLIES = max(0, int(early_plies))
+    LATE_SIMS = int(late_sims) if late_sims is not None else int(num_sims)
 
     env = ChessEnv()
     board = env.reset()
@@ -184,7 +181,7 @@ def play_self_game(
     pos_counts[_pos_key(board)] = 1
 
     while (not env.is_terminal()) and ply < max_plies:
-        t = temperature if ply < temp_moves else TEMP_FLOOR
+        t = temperature if ply < temp_moves else temp_floor
         sims = EARLY_SIMS if ply < EARLY_PLIES else LATE_SIMS
 
         pi, action = mcts_policy_and_action(
@@ -236,12 +233,12 @@ def play_self_game(
         # update repeat table AFTER move
         k = _pos_key(board)
         pos_counts[k] = pos_counts.get(k, 0) + 1
-        if pos_counts[k] >= 2 and STOP_ON_REPEAT2:
+        if pos_counts[k] >= 2 and stop_on_repeat2:
             broke_repeat2 = 1
             break
 
         # no-progress stop AFTER move
-        if board.halfmove_clock >= NO_PROGRESS_LIMIT:
+        if board.halfmove_clock >= int(no_progress_limit):
             broke_no_progress = 1
             break
 
@@ -255,7 +252,7 @@ def play_self_game(
             break
 
         # threefold stop AFTER move
-        if STOP_ON_THREEFOLD and board.can_claim_threefold_repetition():
+        if stop_on_threefold and board.can_claim_threefold_repetition():
             threefold_claimed = 1
             break
 
@@ -268,21 +265,21 @@ def play_self_game(
         true_result_str = board.result(claim_draw=True)
         z = float(env.result_value())
         if z == 0.0:
-            z = DRAW_PENALTY
+            z = float(draw_penalty)
     else:
         # stopped early by our rules or max plies
         if broke_no_progress:
-            z = NO_PROGRESS_PENALTY
+            z = float(no_progress_penalty)
         elif broke_repeat2:
-            z = REPEAT2_PENALTY
+            z = float(repeat2_penalty)
         else:
-            z = DRAW_PENALTY
+            z = float(draw_penalty)
 
     # ---- Material shaping ----
-    if USE_MATERIAL_SHAPING:
+    if use_material_shaping:
         md = float(material_diff_white(board))
         z = float(np.clip(
-            z + MATERIAL_SCALE * md + EXCHANGE_SCALE * favorable_exchanges_white,
+            z + float(material_scale) * md + float(exchange_scale) * favorable_exchanges_white,
             -1.0,
             1.0,
         ))
@@ -317,14 +314,14 @@ def play_self_game(
                 "SimEarly": EARLY_SIMS,
                 "EarlyPlies": EARLY_PLIES,
                 "SimLate": LATE_SIMS,
-                "DrawPenalty": DRAW_PENALTY,
-                "NoProgLimit": NO_PROGRESS_LIMIT,
-                "NoProgPen": NO_PROGRESS_PENALTY,
-                "Repeat2Pen": REPEAT2_PENALTY,
-                "StopOnRepeat2": int(STOP_ON_REPEAT2),
-                "TempFloor": TEMP_FLOOR,
-                "MatScale": MATERIAL_SCALE if USE_MATERIAL_SHAPING else 0.0,
-                "ExchScale": EXCHANGE_SCALE if USE_MATERIAL_SHAPING else 0.0,
+                "DrawPenalty": float(draw_penalty),
+                "NoProgLimit": int(no_progress_limit),
+                "NoProgPen": float(no_progress_penalty),
+                "Repeat2Pen": float(repeat2_penalty),
+                "StopOnRepeat2": int(stop_on_repeat2),
+                "TempFloor": float(temp_floor),
+                "MatScale": float(material_scale) if use_material_shaping else 0.0,
+                "ExchScale": float(exchange_scale) if use_material_shaping else 0.0,
                 "HalfmoveClockEnd": int(board.halfmove_clock),
                 "BrokeNoProg": broke_no_progress,
                 "BrokeRepeat2": broke_repeat2,

@@ -85,6 +85,92 @@ def play_vs_random(
         return float(-z_white)
 
 
+def play_net_vs_net(
+    net_a,
+    net_b,
+    a_plays_white: bool,
+    num_sims: int = 50,
+    max_plies: int = 200,
+    device: str = "cpu",
+) -> float:
+    """
+    Returns game result from net_a perspective:
+      +1 net_a win, 0 draw, -1 net_a loss
+    """
+    env = ChessEnv()
+    board = env.reset()
+    ply = 0
+
+    while (not env.is_terminal()) and ply < max_plies:
+        a_to_move = (board.turn == chess.WHITE and a_plays_white) or (
+            board.turn == chess.BLACK and not a_plays_white
+        )
+        side_net = net_a if a_to_move else net_b
+
+        root = Node(board.copy(stack=False))
+        _, action = mcts_policy_and_action(
+            side_net,
+            root=root,
+            num_sims=num_sims,
+            temperature=1e-6,
+            device=device,
+        )
+        mv = action_to_move(action)
+        if mv not in board.legal_moves:
+            mv = np.random.choice(list(board.legal_moves))
+
+        env.push(mv)
+        board = env.board
+        ply += 1
+
+    if env.is_terminal():
+        z_white = env.result_value()
+    else:
+        z_white = 0.0
+
+    return float(z_white if a_plays_white else -z_white)
+
+
+def eval_candidate_vs_baseline(
+    candidate_net,
+    baseline_net,
+    games: int = 8,
+    num_sims: int = 25,
+    device: str = "cpu",
+) -> dict:
+    """Evaluate candidate model against previous baseline model."""
+    wins = draws = losses = 0
+    results = []
+
+    for i in range(games):
+        candidate_white = (i % 2 == 0)
+        r = play_net_vs_net(
+            candidate_net,
+            baseline_net,
+            a_plays_white=candidate_white,
+            num_sims=num_sims,
+            device=device,
+        )
+        results.append(r)
+        if r > 0:
+            wins += 1
+        elif r < 0:
+            losses += 1
+        else:
+            draws += 1
+
+    score = (wins + 0.5 * draws) / max(1, games)
+    avg_result = float(np.mean(results)) if results else 0.0
+    return {
+        "games": games,
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "score": float(score),
+        "avg_result": avg_result,
+    }
+
+
 def eval_net_vs_random(
     net,
     games: int = 4,

@@ -24,8 +24,30 @@ def cmd_train_selfplay(args: argparse.Namespace) -> int:
     cmd += ["--games_per_iter", str(args.games_per_iter)]
     cmd += ["--batch_size", str(args.batch_size)]
     cmd += ["--train_batches", str(args.train_batches)]
+    cmd += ["--lr", str(args.lr)]
+    cmd += ["--replay_dir", str(args.replay_dir)]
+    cmd += ["--num_sims", str(args.num_sims)]
+    cmd += ["--eval_num_sims", str(args.eval_num_sims)]
+    cmd += ["--draw_penalty", str(args.draw_penalty)]
+    cmd += ["--no_progress_limit", str(args.no_progress_limit)]
+    cmd += ["--no_progress_penalty", str(args.no_progress_penalty)]
+    cmd += ["--repeat2_penalty", str(args.repeat2_penalty)]
+    cmd += ["--temp_floor", str(args.temp_floor)]
+    cmd += ["--material_scale", str(args.material_scale)]
+    cmd += ["--exchange_scale", str(args.exchange_scale)]
+    cmd += ["--early_sims", str(args.early_sims)]
+    cmd += ["--early_plies", str(args.early_plies)]
+    cmd += ["--late_sims", str(args.late_sims)]
+    cmd += ["--gate_games", str(args.gate_games)]
+    cmd += ["--gate_min_score", str(args.gate_min_score)]
     if args.prefer_puzzle_init:
         cmd.append("--prefer_puzzle_init")
+    if args.stop_on_threefold:
+        cmd.append("--stop_on_threefold")
+    if args.stop_on_repeat2:
+        cmd.append("--stop_on_repeat2")
+    if args.use_material_shaping:
+        cmd.append("--use_material_shaping")
     return _run(cmd)
 
 
@@ -143,6 +165,25 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--games_per_iter", type=int, default=40, help="Self-play games per iteration.")
     sp.add_argument("--batch_size", type=int, default=64, help="Training batch size.")
     sp.add_argument("--train_batches", type=int, default=32, help="Gradient batches per iteration.")
+    sp.add_argument("--lr", type=float, default=1e-4, help="Learning rate for self-play updates.")
+    sp.add_argument("--replay_dir", type=str, default="replay", help="Replay shard directory.")
+    sp.add_argument("--num_sims", type=int, default=100, help="MCTS sims per self-play move.")
+    sp.add_argument("--eval_num_sims", type=int, default=25, help="MCTS sims for evaluations.")
+    sp.add_argument("--draw_penalty", type=float, default=0.0, help="Target value for draw-like outcomes.")
+    sp.add_argument("--stop_on_threefold", action="store_true", help="Stop games on claimable threefold repetition.")
+    sp.add_argument("--no_progress_limit", type=int, default=30, help="Halfmove cutoff for no-progress stop.")
+    sp.add_argument("--no_progress_penalty", type=float, default=0.0, help="Target value for no-progress stop.")
+    sp.add_argument("--repeat2_penalty", type=float, default=0.0, help="Target value when repeat2 stop is enabled.")
+    sp.add_argument("--stop_on_repeat2", action="store_true", help="Stop game on second position repetition.")
+    sp.add_argument("--temp_floor", type=float, default=0.1, help="Post-opening move temperature floor.")
+    sp.add_argument("--use_material_shaping", action="store_true", help="Enable material/exchange shaping.")
+    sp.add_argument("--material_scale", type=float, default=0.0, help="Material shaping scale.")
+    sp.add_argument("--exchange_scale", type=float, default=0.0, help="Exchange shaping scale.")
+    sp.add_argument("--early_sims", type=int, default=0, help="Opening sims per move (0=use num_sims).")
+    sp.add_argument("--early_plies", type=int, default=16, help="Opening plies for early_sims.")
+    sp.add_argument("--late_sims", type=int, default=0, help="Late-game sims per move (0=use num_sims).")
+    sp.add_argument("--gate_games", type=int, default=8, help="Gating games vs previous model (0 disables).")
+    sp.add_argument("--gate_min_score", type=float, default=0.55, help="Minimum gate score to accept update.")
     sp.set_defaults(func=cmd_train_selfplay)
 
     sp = sub.add_parser(

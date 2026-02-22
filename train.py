@@ -11,6 +11,7 @@ High-level iteration:
 """
 
 import argparse
+import copy
 import os
 from collections import Counter
 
@@ -22,7 +23,7 @@ from net import AlphaZeroNet
 from selfplay import play_self_game
 from replay_store import save_shard, load_shards_into_buffer
 from selfplay_train_core import ReplayBuffer, train_step
-from eval import eval_net_vs_random
+from eval import eval_candidate_vs_baseline, eval_net_vs_random
 
 
 def main():
@@ -49,6 +50,25 @@ def main():
     parser.add_argument("--games_per_iter", type=int, default=40, help="Self-play games per iteration.")
     parser.add_argument("--batch_size", type=int, default=64, help="Training batch size.")
     parser.add_argument("--train_batches", type=int, default=32, help="Gradient batches per iteration.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Optimizer learning rate.")
+    parser.add_argument("--replay_dir", type=str, default="replay", help="Replay shard directory.")
+    parser.add_argument("--num_sims", type=int, default=100, help="MCTS sims per self-play move.")
+    parser.add_argument("--eval_num_sims", type=int, default=25, help="MCTS sims for eval games.")
+    parser.add_argument("--draw_penalty", type=float, default=0.0, help="Value target for draw-like stops.")
+    parser.add_argument("--stop_on_threefold", action="store_true", help="Stop game on claimable threefold.")
+    parser.add_argument("--no_progress_limit", type=int, default=30, help="Halfmove cutoff for no-progress stop.")
+    parser.add_argument("--no_progress_penalty", type=float, default=0.0, help="Target when no-progress stop triggers.")
+    parser.add_argument("--repeat2_penalty", type=float, default=0.0, help="Target when 2x repeat stop triggers.")
+    parser.add_argument("--stop_on_repeat2", action="store_true", help="Stop game on second position repetition.")
+    parser.add_argument("--temp_floor", type=float, default=0.1, help="Post-opening temperature floor.")
+    parser.add_argument("--use_material_shaping", action="store_true", help="Enable material/exchange shaping.")
+    parser.add_argument("--material_scale", type=float, default=0.0, help="Scale for material shaping.")
+    parser.add_argument("--exchange_scale", type=float, default=0.0, help="Scale for exchange shaping.")
+    parser.add_argument("--early_sims", type=int, default=0, help="Opening-phase sims per move (0=use num_sims).")
+    parser.add_argument("--early_plies", type=int, default=16, help="Opening plies using early_sims.")
+    parser.add_argument("--late_sims", type=int, default=0, help="Mid/endgame sims per move (0=use num_sims).")
+    parser.add_argument("--gate_games", type=int, default=8, help="Candidate-vs-baseline gating games per iter (0 disables).")
+    parser.add_argument("--gate_min_score", type=float, default=0.55, help="Minimum gating score to accept candidate.")
     args = parser.parse_args()
 
     # Optional CPU threading tweak (sometimes speeds up, sometimes slows down)
@@ -56,12 +76,12 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(net.parameters(), lr=float(args.lr))
 
     rb = ReplayBuffer(maxlen=50000)
 
     os.makedirs("games", exist_ok=True)
-    os.makedirs("replay", exist_ok=True)
+    os.makedirs(args.replay_dir, exist_ok=True)
     os.makedirs("runs", exist_ok=True)
 
     writer = SummaryWriter(log_dir="runs/chesszero")
@@ -88,7 +108,9 @@ def main():
     if loaded_ckpt:
         print(f"Loaded {loaded_ckpt}")
         with torch.inference_mode():
-            eval_stats = eval_net_vs_random(net, games=12, num_sims=25, device=device)
+            eval_stats = eval_net_vs_random(
+                net, games=12, num_sims=int(args.eval_num_sims), device=device
+            )
         print(
             f"[INIT EVAL vs Random] W={eval_stats['wins']} D={eval_stats['draws']} "
             f"L={eval_stats['losses']} score={eval_stats['score']:.2f} avg={eval_stats['avg_result']:+.2f}"
@@ -102,23 +124,40 @@ def main():
         )
 
     # Resume replay
-    loaded = load_shards_into_buffer(rb, out_dir="replay", max_samples=50000)
+    loaded = load_shards_into_buffer(rb, out_dir=args.replay_dir, max_samples=50000)
     if loaded > 0:
-        print(f"Loaded {loaded} replay samples from ./replay")
+        print(f"Loaded {loaded} replay samples from ./{args.replay_dir}")
 
     iters = int(args.iters)
     games_per_iter = int(args.games_per_iter)
     batch_size = int(args.batch_size)
     train_batches = int(args.train_batches)
+    selfplay_kwargs = {
+        "num_sims": int(args.num_sims),
+        "device": device,
+        "pgn_dir": "games",
+        "verbose": False,
+        "draw_penalty": float(args.draw_penalty),
+        "stop_on_threefold": bool(args.stop_on_threefold),
+        "no_progress_limit": int(args.no_progress_limit),
+        "no_progress_penalty": float(args.no_progress_penalty),
+        "repeat2_penalty": float(args.repeat2_penalty),
+        "stop_on_repeat2": bool(args.stop_on_repeat2),
+        "temp_floor": float(args.temp_floor),
+        "use_material_shaping": bool(args.use_material_shaping),
+        "material_scale": float(args.material_scale),
+        "exchange_scale": float(args.exchange_scale),
+        "early_sims": (None if int(args.early_sims) <= 0 else int(args.early_sims)),
+        "early_plies": int(args.early_plies),
+        "late_sims": (None if int(args.late_sims) <= 0 else int(args.late_sims)),
+    }
 
     # Bootstrap only if buffer is empty
     if len(rb) == 0:
         bootstrap_games = 5
         for i in range(bootstrap_games):
             with torch.inference_mode():
-                samples, stats, pgn_path = play_self_game(
-                    net, num_sims=100, device=device, pgn_dir="games", verbose=False
-                )
+                samples, stats, pgn_path = play_self_game(net, **selfplay_kwargs)
             rb.add_many(samples)
             print(f"Bootstrap {i+1}/{bootstrap_games}: result={stats['result_str']} plies={stats['plies']} pgn={pgn_path}")
 
@@ -142,9 +181,7 @@ def main():
 
             for _ in range(games_per_iter):
                 with torch.inference_mode():
-                    samples, stats, pgn_path = play_self_game(
-                        net, num_sims=100, device=device, pgn_dir="games", verbose=False
-                    )
+                    samples, stats, pgn_path = play_self_game(net, **selfplay_kwargs)
                 rb.add_many(samples)
                 iter_samples.extend(samples)
 
@@ -164,7 +201,7 @@ def main():
                 halfmove_end_list.append(stats.get("halfmove_clock_end", 0))
 
             # Persist training data
-            shard_path = save_shard(iter_samples, out_dir="replay")
+            shard_path = save_shard(iter_samples, out_dir=args.replay_dir)
             print("Saved replay shard:", shard_path)
 
             cnt = Counter(results)
@@ -215,6 +252,8 @@ def main():
                 print("Replay buffer too small to train yet.")
                 continue
 
+            before_train_state = copy.deepcopy(net.state_dict())
+            before_opt_state = copy.deepcopy(opt.state_dict())
             losses = []
             for _ in range(train_batches):
                 s, pi, v = rb.sample(batch_size)
@@ -227,21 +266,49 @@ def main():
             writer.add_scalar("train/policy_loss", avg[1], it)
             writer.add_scalar("train/value_loss", avg[2], it)
 
+            accepted = True
+            if int(args.gate_games) > 0:
+                baseline = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
+                baseline.load_state_dict(before_train_state)
+                baseline.eval()
+                with torch.inference_mode():
+                    gate_stats = eval_candidate_vs_baseline(
+                        net,
+                        baseline,
+                        games=int(args.gate_games),
+                        num_sims=int(args.eval_num_sims),
+                        device=device,
+                    )
+                print(
+                    f"[GATE vs Previous] W={gate_stats['wins']} D={gate_stats['draws']} "
+                    f"L={gate_stats['losses']} score={gate_stats['score']:.2f} "
+                    f"threshold={args.gate_min_score:.2f}"
+                )
+                writer.add_scalar("gate/score_vs_prev", gate_stats["score"], it)
+                accepted = float(gate_stats["score"]) >= float(args.gate_min_score)
+                if not accepted:
+                    net.load_state_dict(before_train_state)
+                    opt.load_state_dict(before_opt_state)
+                    print("[GATE] rejected candidate; reverted to previous model/optimizer state.")
+
             # Checkpoints
-            checkpoint_payload = {
-                "model_state_dict": net.state_dict(),
-                "optimizer_state_dict": opt.state_dict(),
-                "iter": it,
-            }
-            torch.save(checkpoint_payload, "checkpoint_latest.pt")
-            if it % 10 == 0:
-                torch.save(checkpoint_payload, f"checkpoint_{it:03d}.pt")
-                print("Saved checkpoint.")
+            if accepted:
+                checkpoint_payload = {
+                    "model_state_dict": net.state_dict(),
+                    "optimizer_state_dict": opt.state_dict(),
+                    "iter": it,
+                }
+                torch.save(checkpoint_payload, "checkpoint_latest.pt")
+                if it % 10 == 0:
+                    torch.save(checkpoint_payload, f"checkpoint_{it:03d}.pt")
+                    print("Saved checkpoint.")
 
             # ---- Evaluation vs random ----
             if it % 2 == 0:
                 with torch.inference_mode():
-                    eval_stats = eval_net_vs_random(net, games=12, num_sims=25, device=device)
+                    eval_stats = eval_net_vs_random(
+                        net, games=12, num_sims=int(args.eval_num_sims), device=device
+                    )
 
                 print(
                     f"[EVAL vs Random] games={eval_stats['games']} "

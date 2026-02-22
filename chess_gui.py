@@ -203,6 +203,157 @@ class ChessControlPanel(tk.Tk):
             "32",
             "Number of gradient updates per iteration.",
         )
+        self.sp_lr = self._add_entry(
+            f,
+            "Learning rate",
+            "1e-4",
+            "Safer self-play default. Lower helps avoid forgetting puzzle pretraining.",
+        )
+        self.sp_replay_dir = self._add_entry(
+            f,
+            "Replay dir",
+            "replay",
+            "Directory for replay shards. Use a fresh folder to avoid stale data mixing.",
+        )
+        self.sp_num_sims = self._add_entry(
+            f,
+            "Self-play sims",
+            "100",
+            "MCTS simulations per self-play move.",
+        )
+        self.sp_eval_num_sims = self._add_entry(
+            f,
+            "Eval sims",
+            "25",
+            "MCTS simulations used for evaluations and gating.",
+        )
+        self.sp_draw_penalty = self._add_entry(
+            f,
+            "Draw penalty",
+            "0.0",
+            "Target for draw-like outcomes. Keep 0.0 for unbiased baseline training.",
+        )
+        self.sp_stop_threefold = self._add_check(
+            f,
+            "Stop on threefold",
+            False,
+            "Stop game when threefold repetition can be claimed.",
+        )
+        self.sp_no_prog_limit = self._add_entry(
+            f,
+            "No-progress limit",
+            "30",
+            "Halfmove cutoff for no pawn/capture progress.",
+        )
+        self.sp_no_prog_penalty = self._add_entry(
+            f,
+            "No-progress penalty",
+            "0.0",
+            "Target used when no-progress stop triggers.",
+        )
+        self.sp_repeat2_penalty = self._add_entry(
+            f,
+            "Repeat2 penalty",
+            "0.0",
+            "Target used when repeat2 stop triggers.",
+        )
+        self.sp_stop_repeat2 = self._add_check(
+            f,
+            "Stop on repeat2",
+            False,
+            "End game on second repetition of a position (optional).",
+        )
+        self.sp_temp_floor = self._add_entry(
+            f,
+            "Temp floor",
+            "0.1",
+            "Minimum move temperature after opening exploration window.",
+        )
+        self.sp_use_mat_shape = self._add_check(
+            f,
+            "Use material shaping",
+            False,
+            "Usually OFF for stable baseline. ON adds heuristic reward shaping.",
+        )
+        self.sp_mat_scale = self._add_entry(
+            f,
+            "Material scale",
+            "0.0",
+            "Material shaping coefficient.",
+        )
+        self.sp_exch_scale = self._add_entry(
+            f,
+            "Exchange scale",
+            "0.0",
+            "Exchange shaping coefficient.",
+        )
+        self.sp_early_sims = self._add_entry(
+            f,
+            "Early sims",
+            "0",
+            "Opening sims (0 means use Self-play sims).",
+        )
+        self.sp_early_plies = self._add_entry(
+            f,
+            "Early plies",
+            "16",
+            "Opening plies that use Early sims.",
+        )
+        self.sp_late_sims = self._add_entry(
+            f,
+            "Late sims",
+            "0",
+            "Late-game sims (0 means use Self-play sims).",
+        )
+        self.sp_gate_games = self._add_entry(
+            f,
+            "Gate games",
+            "8",
+            "Candidate-vs-previous games per iteration (0 disables gating).",
+        )
+        self.sp_gate_min_score = self._add_entry(
+            f,
+            "Gate min score",
+            "0.55",
+            "Minimum gate score to accept a newly trained model.",
+        )
+        preset_row = ttk.Frame(f)
+        preset_row.pack(fill="x", padx=8, pady=(8, 6))
+        ttk.Button(
+            preset_row,
+            text="Apply Safe Preset",
+            command=self._apply_safe_selfplay_preset,
+        ).pack(side="left")
+        ttk.Label(
+            preset_row,
+            text="Sets stable defaults to reduce self-play regression.",
+            foreground="#5f6368",
+        ).pack(side="left", padx=(8, 0))
+
+    def _apply_safe_selfplay_preset(self) -> None:
+        """Populate conservative self-play defaults for more stable fine-tuning."""
+        self.sp_prefer_puzzle.set(True)
+        self.sp_puzzle_ckpt.set("checkpoint_puzzle_best.pt")
+        self.sp_lr.set("1e-4")
+        self.sp_replay_dir.set("replay_fresh")
+        self.sp_num_sims.set("120")
+        self.sp_eval_num_sims.set("50")
+        self.sp_draw_penalty.set("0.0")
+        self.sp_stop_threefold.set(False)
+        self.sp_no_prog_limit.set("30")
+        self.sp_no_prog_penalty.set("0.0")
+        self.sp_repeat2_penalty.set("0.0")
+        self.sp_stop_repeat2.set(False)
+        self.sp_temp_floor.set("0.1")
+        self.sp_use_mat_shape.set(False)
+        self.sp_mat_scale.set("0.0")
+        self.sp_exch_scale.set("0.0")
+        self.sp_early_sims.set("0")
+        self.sp_early_plies.set("16")
+        self.sp_late_sims.set("0")
+        self.sp_gate_games.set("12")
+        self.sp_gate_min_score.set("0.55")
+        self._append_log("[Preset] Applied Safe self-play preset.\n")
 
     def _build_puzzle_train_tab(self) -> None:
         f = self.tabs["Puzzle Train"]
@@ -536,9 +687,31 @@ class ChessControlPanel(tk.Tk):
                 "--games_per_iter", self.sp_games_per_iter.get(),
                 "--batch_size", self.sp_batch_size.get(),
                 "--train_batches", self.sp_train_batches.get(),
+                "--lr", self.sp_lr.get(),
+                "--replay_dir", self.sp_replay_dir.get(),
+                "--num_sims", self.sp_num_sims.get(),
+                "--eval_num_sims", self.sp_eval_num_sims.get(),
+                "--draw_penalty", self.sp_draw_penalty.get(),
+                "--no_progress_limit", self.sp_no_prog_limit.get(),
+                "--no_progress_penalty", self.sp_no_prog_penalty.get(),
+                "--repeat2_penalty", self.sp_repeat2_penalty.get(),
+                "--temp_floor", self.sp_temp_floor.get(),
+                "--material_scale", self.sp_mat_scale.get(),
+                "--exchange_scale", self.sp_exch_scale.get(),
+                "--early_sims", self.sp_early_sims.get(),
+                "--early_plies", self.sp_early_plies.get(),
+                "--late_sims", self.sp_late_sims.get(),
+                "--gate_games", self.sp_gate_games.get(),
+                "--gate_min_score", self.sp_gate_min_score.get(),
             ]
             if self.sp_prefer_puzzle.get():
                 cmd.append("--prefer_puzzle_init")
+            if self.sp_stop_threefold.get():
+                cmd.append("--stop_on_threefold")
+            if self.sp_stop_repeat2.get():
+                cmd.append("--stop_on_repeat2")
+            if self.sp_use_mat_shape.get():
+                cmd.append("--use_material_shaping")
         elif tab_name == "Puzzle Train":
             cmd = [
                 *base, "train-puzzles",
