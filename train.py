@@ -88,32 +88,55 @@ def main():
 
     # Resume model: optionally transfer from puzzle-pretrained checkpoint.
     loaded_ckpt = None
+    loaded_ckpt_iter = None
 
-    def _load_checkpoint(path: str) -> None:
+    def _load_checkpoint(path: str) -> int | None:
         payload = torch.load(path, map_location=device)
         if isinstance(payload, dict) and "model_state_dict" in payload:
             net.load_state_dict(payload["model_state_dict"])
             if "optimizer_state_dict" in payload:
                 opt.load_state_dict(payload["optimizer_state_dict"])
+            return int(payload["iter"]) if "iter" in payload else None
         else:
             # Backward-compat: old checkpoints with weights-only state_dict.
             net.load_state_dict(payload)
+            return None
     if args.prefer_puzzle_init and args.puzzle_checkpoint and os.path.exists(args.puzzle_checkpoint):
-        _load_checkpoint(args.puzzle_checkpoint)
+        loaded_ckpt_iter = _load_checkpoint(args.puzzle_checkpoint)
         loaded_ckpt = args.puzzle_checkpoint
     elif args.init_checkpoint and os.path.exists(args.init_checkpoint):
-        _load_checkpoint(args.init_checkpoint)
+        loaded_ckpt_iter = _load_checkpoint(args.init_checkpoint)
         loaded_ckpt = args.init_checkpoint
 
+    init_eval_score: float | None = None
+    last_eval_score: float | None = None
+    best_eval_score: float = -1.0
+    best_eval_iter: int = 0
+    last_gate_score: float | None = None
+    best_gate_score: float = -1.0
+    best_gate_iter: int = 0
+    accepted_count = 0
+    rejected_count = 0
+
     if loaded_ckpt:
-        print(f"Loaded {loaded_ckpt}")
+        if loaded_ckpt_iter is not None:
+            print(f"Loaded {loaded_ckpt} (iter={loaded_ckpt_iter})")
+        else:
+            print(f"Loaded {loaded_ckpt}")
         with torch.inference_mode():
             eval_stats = eval_net_vs_random(
                 net, games=12, num_sims=int(args.eval_num_sims), device=device
             )
+        init_eval_score = float(eval_stats["score"])
+        last_eval_score = init_eval_score
+        best_eval_score = init_eval_score
+        best_eval_iter = 0
         print(
             f"[INIT EVAL vs Random] W={eval_stats['wins']} D={eval_stats['draws']} "
             f"L={eval_stats['losses']} score={eval_stats['score']:.2f} avg={eval_stats['avg_result']:+.2f}"
+        )
+        print(
+            f"[BASELINE] random_score={init_eval_score:.3f} (reference for future deltas)"
         )
         writer.add_scalar("eval_random/init_score", eval_stats["score"], 0)
         writer.add_scalar("eval_random/init_avg_result", eval_stats["avg_result"], 0)
@@ -151,6 +174,21 @@ def main():
         "early_plies": int(args.early_plies),
         "late_sims": (None if int(args.late_sims) <= 0 else int(args.late_sims)),
     }
+    print(
+        "[Setup] "
+        f"iters={iters} games_per_iter={games_per_iter} batch_size={batch_size} "
+        f"train_batches={train_batches} lr={float(args.lr):.2e} "
+        f"num_sims={int(args.num_sims)} eval_num_sims={int(args.eval_num_sims)} "
+        f"gate_games={int(args.gate_games)} gate_min_score={float(args.gate_min_score):.2f}"
+    )
+    print(
+        "[Setup] "
+        f"shaping(use_material={bool(args.use_material_shaping)} "
+        f"draw_penalty={float(args.draw_penalty):+.2f} "
+        f"no_progress_penalty={float(args.no_progress_penalty):+.2f} "
+        f"repeat2_penalty={float(args.repeat2_penalty):+.2f}) "
+        f"replay_dir={args.replay_dir}"
+    )
 
     # Bootstrap only if buffer is empty
     if len(rb) == 0:
@@ -163,6 +201,7 @@ def main():
 
     try:
         for it in range(1, iters + 1):
+            print(f"\n=== Iteration {it}/{iters} ===")
             # -------- Self-play --------
             results = []
             plies_list = []
@@ -279,17 +318,36 @@ def main():
                         num_sims=int(args.eval_num_sims),
                         device=device,
                     )
+                gate_score = float(gate_stats["score"])
+                delta_thresh = gate_score - float(args.gate_min_score)
+                delta_prev = None if last_gate_score is None else (gate_score - last_gate_score)
                 print(
                     f"[GATE vs Previous] W={gate_stats['wins']} D={gate_stats['draws']} "
-                    f"L={gate_stats['losses']} score={gate_stats['score']:.2f} "
-                    f"threshold={args.gate_min_score:.2f}"
+                    f"L={gate_stats['losses']} score={gate_score:.2f} "
+                    f"threshold={args.gate_min_score:.2f} Δthreshold={delta_thresh:+.2f}"
+                    + ("" if delta_prev is None else f" Δprev={delta_prev:+.2f}")
                 )
-                writer.add_scalar("gate/score_vs_prev", gate_stats["score"], it)
-                accepted = float(gate_stats["score"]) >= float(args.gate_min_score)
+                writer.add_scalar("gate/score_vs_prev", gate_score, it)
+                accepted = gate_score >= float(args.gate_min_score)
+                if gate_score > best_gate_score:
+                    best_gate_score = gate_score
+                    best_gate_iter = it
+                    print(
+                        f"[GATE] new best gate score: {best_gate_score:.2f} at iter {best_gate_iter}"
+                    )
+                last_gate_score = gate_score
                 if not accepted:
                     net.load_state_dict(before_train_state)
                     opt.load_state_dict(before_opt_state)
+                    rejected_count += 1
                     print("[GATE] rejected candidate; reverted to previous model/optimizer state.")
+                else:
+                    accepted_count += 1
+                    print(
+                        f"[GATE] accepted candidate (accepted={accepted_count}, rejected={rejected_count})"
+                    )
+            else:
+                accepted_count += 1
 
             # Checkpoints
             if accepted:
@@ -299,9 +357,10 @@ def main():
                     "iter": it,
                 }
                 torch.save(checkpoint_payload, "checkpoint_latest.pt")
+                print("[Checkpoint] updated checkpoint_latest.pt (accepted candidate)")
                 if it % 10 == 0:
                     torch.save(checkpoint_payload, f"checkpoint_{it:03d}.pt")
-                    print("Saved checkpoint.")
+                    print(f"[Checkpoint] saved snapshot checkpoint_{it:03d}.pt")
 
             # ---- Evaluation vs random ----
             if it % 2 == 0:
@@ -310,17 +369,49 @@ def main():
                         net, games=12, num_sims=int(args.eval_num_sims), device=device
                     )
 
+                eval_score = float(eval_stats["score"])
+                delta_prev_eval = None if last_eval_score is None else (eval_score - last_eval_score)
+                delta_init = None if init_eval_score is None else (eval_score - init_eval_score)
+                improved_best = eval_score > best_eval_score
+                if improved_best:
+                    best_eval_score = eval_score
+                    best_eval_iter = it
+                last_eval_score = eval_score
                 print(
                     f"[EVAL vs Random] games={eval_stats['games']} "
                     f"W={eval_stats['wins']} D={eval_stats['draws']} L={eval_stats['losses']} "
-                    f"score={eval_stats['score']:.2f} avg={eval_stats['avg_result']:+.2f}"
+                    f"score={eval_score:.2f} avg={eval_stats['avg_result']:+.2f}"
+                    + ("" if delta_prev_eval is None else f" Δprev={delta_prev_eval:+.2f}")
+                    + ("" if delta_init is None else f" Δinit={delta_init:+.2f}")
+                )
+                print(
+                    f"[EVAL] best_random_score={best_eval_score:.2f} at iter {best_eval_iter}"
+                    + (" (NEW BEST)" if improved_best else "")
                 )
 
-                writer.add_scalar("eval_random/score", eval_stats["score"], it)
+                writer.add_scalar("eval_random/score", eval_score, it)
                 writer.add_scalar("eval_random/wins", eval_stats["wins"], it)
                 writer.add_scalar("eval_random/draws", eval_stats["draws"], it)
                 writer.add_scalar("eval_random/losses", eval_stats["losses"], it)
                 writer.add_scalar("eval_random/avg_result", eval_stats["avg_result"], it)
+                if delta_prev_eval is not None:
+                    writer.add_scalar("eval_random/delta_prev", delta_prev_eval, it)
+                if delta_init is not None:
+                    writer.add_scalar("eval_random/delta_init", delta_init, it)
+
+            print(
+                f"[ITER {it:03d} SUMMARY] accepted={accepted_count} rejected={rejected_count} "
+                + (
+                    f"best_gate={best_gate_score:.2f}@{best_gate_iter}"
+                    if best_gate_score >= 0
+                    else "best_gate=n/a"
+                )
+                + (
+                    ""
+                    if best_eval_score < 0
+                    else f" best_eval={best_eval_score:.2f}@{best_eval_iter}"
+                )
+            )
 
     finally:
         writer.close()

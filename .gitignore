@@ -25,7 +25,7 @@ htmlcov/
 Thumbs.db
 
 # ---- ML checkpoints / model weights ----
-*.pt
+#*.pt
 *.pth
 
 # ---- TensorBoard / training logs ----
