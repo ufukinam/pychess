@@ -9,7 +9,7 @@ import numpy as np
 
 def save_shard(samples, out_dir: str = "replay", prefix: str = "shard") -> str:
     """
-    samples: list of (state(18,8,8), pi(ACTION_SIZE,), v)
+    samples: list of (state(IN_CHANNELS,8,8), pi(ACTION_SIZE,), v)
     Saves a compressed .npz shard to disk.
     """
     os.makedirs(out_dir, exist_ok=True)

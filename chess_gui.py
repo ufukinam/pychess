@@ -225,13 +225,13 @@ class ChessControlPanel(tk.Tk):
         self.sp_num_sims = self._add_entry(
             f,
             "Self-play sims",
-            "100",
+            "400",
             "MCTS simulations per self-play move.",
         )
         self.sp_eval_num_sims = self._add_entry(
             f,
             "Eval sims",
-            "25",
+            "50",
             "MCTS simulations used for evaluations and gating.",
         )
         self.sp_draw_penalty = self._add_entry(
@@ -315,13 +315,13 @@ class ChessControlPanel(tk.Tk):
         self.sp_gate_games = self._add_entry(
             f,
             "Gate games",
-            "8",
+            "30",
             "Candidate-vs-previous games per iteration (0 disables gating).",
         )
         self.sp_gate_min_score = self._add_entry(
             f,
             "Gate min score",
-            "0.55",
+            "0.52",
             "Minimum gate score to accept a newly trained model.",
         )
         self.sp_feedback_jsonl = self._add_entry(
@@ -354,6 +354,12 @@ class ChessControlPanel(tk.Tk):
             "0",
             "0 = load all rows; set cap for quick experiments.",
         )
+        self.sp_augment = self._add_check(
+            f,
+            "Color-flip augmentation",
+            True,
+            "50% chance to color-flip each sampled position during training.",
+        )
         preset_row = ttk.Frame(f)
         preset_row.pack(fill="x", padx=8, pady=(8, 6))
         ttk.Button(
@@ -373,7 +379,7 @@ class ChessControlPanel(tk.Tk):
         self.sp_puzzle_ckpt.set("checkpoint_puzzle_best.pt")
         self.sp_lr.set("1e-4")
         self.sp_replay_dir.set("replay_fresh")
-        self.sp_num_sims.set("120")
+        self.sp_num_sims.set("400")
         self.sp_eval_num_sims.set("50")
         self.sp_draw_penalty.set("0.0")
         self.sp_stop_threefold.set(False)
@@ -388,8 +394,8 @@ class ChessControlPanel(tk.Tk):
         self.sp_early_sims.set("0")
         self.sp_early_plies.set("16")
         self.sp_late_sims.set("0")
-        self.sp_gate_games.set("12")
-        self.sp_gate_min_score.set("0.55")
+        self.sp_gate_games.set("30")
+        self.sp_gate_min_score.set("0.52")
         self.sp_feedback_jsonl.set("")
         self.sp_feedback_weight.set("0.2")
         self.sp_feedback_batch.set("32")
@@ -852,6 +858,8 @@ class ChessControlPanel(tk.Tk):
                 cmd.append("--stop_on_repeat2")
             if self.sp_use_mat_shape.get():
                 cmd.append("--use_material_shaping")
+            if self.sp_augment.get():
+                cmd.append("--augment")
         elif tab_name == "Puzzle Train":
             cmd = [
                 *base, "train-puzzles",

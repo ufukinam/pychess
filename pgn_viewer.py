@@ -10,11 +10,9 @@ from tkinter import filedialog, messagebox
 import chess
 import chess.pgn
 
-
-UNICODE_PIECE = {
-    "P": "♙", "N": "♘", "B": "♗", "R": "♖", "Q": "♕", "K": "♔",
-    "p": "♟", "n": "♞", "b": "♝", "r": "♜", "q": "♛", "k": "♚",
-}
+from chess_board_base import (
+    BoardRenderer, create_capture_grid, recompute_captures, update_capture_display,
+)
 
 
 class PGNViewer(tk.Tk):
@@ -58,11 +56,11 @@ class PGNViewer(tk.Tk):
 
         # --- Left captured pieces (captured BY White) ---
         tk.Label(self.left_frame, text="White captured", font=("Arial", 12, "bold")).pack(anchor="n")
-        self.white_capture_slots = self._create_capture_grid(self.left_frame)
+        self.white_capture_slots = create_capture_grid(self.left_frame)
 
         # --- Right captured pieces (captured BY Black) ---
         tk.Label(self.right_frame, text="Black captured", font=("Arial", 12, "bold")).pack(anchor="n")
-        self.black_capture_slots = self._create_capture_grid(self.right_frame)
+        self.black_capture_slots = create_capture_grid(self.right_frame)
 
         # --- Board canvas ---
         self.canvas = tk.Canvas(
@@ -73,6 +71,7 @@ class PGNViewer(tk.Tk):
         self.canvas.grid(row=0, column=0, columnspan=5, sticky="nsew")
         self.canvas.bind("<Configure>", self.on_canvas_resized)
         self.center_frame.bind("<Configure>", self.on_center_resized)
+        self.renderer = BoardRenderer(self.canvas)
 
         # --- Controls ---
         self.btn_open = tk.Button(self.center_frame, text="Open PGN", command=self.open_pgn)
@@ -432,24 +431,8 @@ class PGNViewer(tk.Tk):
         win.grab_set()
 
     # -----------------------------
-    # CAPTURED PIECES (recompute up to ply_index)
+    # CAPTURED PIECES
     # -----------------------------
-    def _create_capture_grid(self, parent: tk.Widget) -> list[tk.Label]:
-        box = tk.Frame(parent, relief="groove", bd=1, padx=4, pady=4)
-        box.pack(anchor="n", fill="x", pady=(6, 0))
-
-        for col in range(5):
-            box.grid_columnconfigure(col, weight=1)
-
-        slots: list[tk.Label] = []
-        for row in range(3):
-            box.grid_rowconfigure(row, weight=1)
-            for col in range(5):
-                lbl = tk.Label(box, text=" ", font=("Arial", 18), width=1, anchor="center")
-                lbl.grid(row=row, column=col, sticky="nsew")
-                slots.append(lbl)
-        return slots
-
     def on_side_resized(self, _event=None):
         self.update_capture_slot_layout()
 
@@ -457,59 +440,21 @@ class PGNViewer(tk.Tk):
         panel_w = min(self.left_frame.winfo_width(), self.right_frame.winfo_width())
         if panel_w <= 1:
             return
-
-        # Keep 5 columns of piece glyphs visible in narrow side panels.
         cell_w = max(14, int((panel_w - 16) / 5))
         font_size = max(10, min(24, int(cell_w * 0.72)))
         pad_x = max(0, int(cell_w * 0.08))
         pad_y = max(0, int(font_size * 0.06))
-
         for lbl in self.white_capture_slots + self.black_capture_slots:
             lbl.config(font=("Arial", font_size), padx=pad_x, pady=pad_y)
 
-    def recompute_captures(self):
-        """
-        Returns (white_taken, black_taken)
-        white_taken: unicode pieces captured BY White (black pieces taken)
-        black_taken: unicode pieces captured BY Black (white pieces taken)
-        """
-        if self.game is None:
-            return [], []
-
-        b = self.game.board()
-
-        white_taken = []  # black pieces captured by White
-        black_taken = []  # white pieces captured by Black
-
-        for i in range(self.ply_index):
-            mv = self.moves[i]
-            mover_is_white = b.turn == chess.WHITE  # before push
-
-            captured_symbol = None
-            if b.is_en_passant(mv):
-                captured_symbol = "p" if mover_is_white else "P"
-            elif b.is_capture(mv):
-                cap_piece = b.piece_at(mv.to_square)
-                if cap_piece is not None:
-                    captured_symbol = cap_piece.symbol()
-
-            b.push(mv)
-
-            if captured_symbol is not None:
-                if mover_is_white:
-                    white_taken.append(UNICODE_PIECE[captured_symbol])
-                else:
-                    black_taken.append(UNICODE_PIECE[captured_symbol])
-
-        return white_taken, black_taken
-
     def update_side_panels(self):
-        wcap, bcap = self.recompute_captures()
-
-        for i, lbl in enumerate(self.white_capture_slots):
-            lbl.config(text=wcap[i] if i < len(wcap) else " ")
-        for i, lbl in enumerate(self.black_capture_slots):
-            lbl.config(text=bcap[i] if i < len(bcap) else " ")
+        if self.game is None:
+            wcap, bcap = [], []
+        else:
+            initial = self.game.board()
+            wcap, bcap = recompute_captures(self.moves, self.ply_index, initial_board=initial)
+        update_capture_display(self.white_capture_slots, wcap)
+        update_capture_display(self.black_capture_slots, bcap)
 
     # -----------------------------
     # UI UPDATE
@@ -544,85 +489,8 @@ class PGNViewer(tk.Tk):
 
     def draw(self):
         self._resize_after_id = None
-        self.canvas.delete("all")
-
-        light = "#EEEED2"
-        dark = "#769656"
-        canvas_w = self.canvas.winfo_width()
-        canvas_h = self.canvas.winfo_height()
-        if canvas_w < 50 or canvas_h < 50:
-            canvas_w = self.board_px + 2 * self.margin
-            canvas_h = self.board_px + 2 * self.margin
-
-        reserve_left = max(16, int(canvas_w * 0.03))
-        reserve_bottom = max(16, int(canvas_h * 0.03))
-        board_px = max(
-            160,
-            min(
-                canvas_w - 2 * self.margin - reserve_left,
-                canvas_h - 2 * self.margin - reserve_bottom,
-            ),
-        )
-        self.square = board_px / 8
-        self.coord_left_pad = max(12, int(self.square * 0.35))
-        self.coord_bottom_pad = max(12, int(self.square * 0.35))
-        self.board_origin_x = (canvas_w - board_px - self.coord_left_pad) / 2 + self.coord_left_pad
-        self.board_origin_y = (canvas_h - board_px - self.coord_bottom_pad) / 2
-        piece_font = max(14, int(self.square * 0.58))
-        highlight_width = max(2, int(self.square * 0.05))
-
-        # squares
-        for r in range(8):
-            for c in range(8):
-                x0 = self.board_origin_x + c * self.square
-                y0 = self.board_origin_y + r * self.square
-                x1 = x0 + self.square
-                y1 = y0 + self.square
-                color = light if (r + c) % 2 == 0 else dark
-                self.canvas.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
-
-        # pieces
-        for sq, piece in self.board.piece_map().items():
-            r = 7 - chess.square_rank(sq)
-            c = chess.square_file(sq)
-            x = self.board_origin_x + c * self.square + self.square / 2
-            y = self.board_origin_y + r * self.square + self.square / 2
-            ch = UNICODE_PIECE[piece.symbol()]
-            self.canvas.create_text(x, y, text=ch, font=("Arial", piece_font))
-
-        # last move highlight
-        if self.game is not None and self.ply_index > 0:
-            mv = self.moves[self.ply_index - 1]
-            self.highlight_square(mv.from_square, highlight_width)
-            self.highlight_square(mv.to_square, highlight_width)
-
-        self.draw_coordinates()
-
-    def highlight_square(self, sq: int, width: int = 3):
-        r = 7 - chess.square_rank(sq)
-        c = chess.square_file(sq)
-        x0 = self.board_origin_x + c * self.square
-        y0 = self.board_origin_y + r * self.square
-        x1 = x0 + self.square
-        y1 = y0 + self.square
-        inset = max(2, int(self.square * 0.04))
-        self.canvas.create_rectangle(x0 + inset, y0 + inset, x1 - inset, y1 - inset, outline="red", width=width)
-
-    def draw_coordinates(self):
-        label_font = ("Arial", max(9, int(self.square * 0.16)))
-        text_color = "#333333"
-
-        files = list("abcdefgh")
-        for c in range(8):
-            x = self.board_origin_x + c * self.square + self.square / 2
-            y = self.board_origin_y + (self.square * 8) + self.coord_bottom_pad * 0.55
-            self.canvas.create_text(x, y, text=files[c], font=label_font, fill=text_color)
-
-        ranks = [str(r) for r in range(8, 0, -1)]
-        for r in range(8):
-            x = self.board_origin_x - self.coord_left_pad * 0.55
-            y = self.board_origin_y + r * self.square + self.square / 2
-            self.canvas.create_text(x, y, text=ranks[r], font=label_font, fill=text_color)
+        last_move = self.moves[self.ply_index - 1] if (self.game is not None and self.ply_index > 0) else None
+        self.renderer.draw(self.board, last_move=last_move)
 
 
 if __name__ == "__main__":

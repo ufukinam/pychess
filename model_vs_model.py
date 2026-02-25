@@ -14,32 +14,16 @@ import torch
 
 from mcts import Node, mcts_policy_and_action
 from net import AlphaZeroNet
-
-
-UNICODE_PIECE = {
-    "P": "\u2659", "N": "\u2658", "B": "\u2657", "R": "\u2656", "Q": "\u2655", "K": "\u2654",
-    "p": "\u265F", "n": "\u265E", "b": "\u265D", "r": "\u265C", "q": "\u265B", "k": "\u265A",
-}
+from encode import action_to_move, IN_CHANNELS
+from chess_board_base import (
+    BoardRenderer, create_capture_grid, recompute_captures, update_capture_display,
+)
 
 DEFAULT_PGN_DIR = "model_games"
 
 
-def action_to_move(action: int) -> chess.Move:
-    frm = action // (64 * 5)
-    to = (action // 5) % 64
-    promo_idx = action % 5
-    promo = None if promo_idx == 0 else {
-        1: chess.KNIGHT,
-        2: chess.BISHOP,
-        3: chess.ROOK,
-        4: chess.QUEEN,
-    }[promo_idx]
-    return chess.Move(frm, to, promotion=promo)
-
-
-def save_pgn_from_moves(moves: list[chess.Move], result_str: str, out_dir: str, white_name: str, black_name: str) -> str:
+def save_pgn_from_moves(moves, result_str, out_dir, white_name, black_name):
     os.makedirs(out_dir, exist_ok=True)
-
     game = chess.pgn.Game()
     game.headers["Event"] = "ModelVsModel"
     game.headers["Site"] = "Local"
@@ -47,11 +31,9 @@ def save_pgn_from_moves(moves: list[chess.Move], result_str: str, out_dir: str, 
     game.headers["White"] = white_name
     game.headers["Black"] = black_name
     game.headers["Result"] = result_str
-
     node = game
     for mv in moves:
         node = node.add_variation(mv)
-
     ts = time.strftime("%Y%m%d_%H%M%S")
     path = os.path.join(out_dir, f"model_vs_model_{ts}.pgn")
     with open(path, "w", encoding="utf-8") as f:
@@ -59,17 +41,15 @@ def save_pgn_from_moves(moves: list[chess.Move], result_str: str, out_dir: str, 
     return path
 
 
-def discover_checkpoints() -> list[str]:
+def discover_checkpoints():
     files: set[str] = set()
     for pattern in ("*.pt", "*.pth"):
         files.update(glob.glob(pattern))
-
     ordered: list[str] = []
     for preferred in ("checkpoint_latest.pt", "checkpoint_puzzle_latest.pt", "checkpoint_puzzle_best.pt"):
         if preferred in files:
             ordered.append(preferred)
             files.remove(preferred)
-
     ordered.extend(sorted(files))
     if not ordered:
         ordered = ["<untrained>"]
@@ -77,7 +57,8 @@ def discover_checkpoints() -> list[str]:
 
 
 class ModelVsModelApp(tk.Tk):
-    def __init__(self, device: str = "cpu", num_sims: int = 50, pgn_dir: str = DEFAULT_PGN_DIR, move_delay_ms: int = 400):
+    def __init__(self, device="cpu", num_sims=50, pgn_dir=DEFAULT_PGN_DIR,
+                 move_delay_ms=400, channels=128, num_blocks=10):
         super().__init__()
         self.title("Model vs Model")
         self.resizable(True, True)
@@ -88,12 +69,10 @@ class ModelVsModelApp(tk.Tk):
         self.pgn_dir = pgn_dir
         self.move_delay_ms = int(move_delay_ms)
         self.feedback_out_path = "feedback.jsonl"
+        self.channels = channels
+        self.num_blocks = num_blocks
 
-        self.square = 64
         self.margin = 10
-        self.board_px = self.square * 8
-        self.board_origin_x = 0
-        self.board_origin_y = 0
         self._resize_after_id: str | None = None
         self._autoplay_after_id: str | None = None
 
@@ -117,53 +96,42 @@ class ModelVsModelApp(tk.Tk):
             self.center_frame.grid_columnconfigure(col, weight=1)
 
         tk.Label(self.left_frame, text="White captured", font=("Arial", 12, "bold")).pack(anchor="n")
-        self.white_capture_slots = self._create_capture_grid(self.left_frame)
+        self.white_capture_slots = create_capture_grid(self.left_frame)
         tk.Label(self.right_frame, text="Black captured", font=("Arial", 12, "bold")).pack(anchor="n")
-        self.black_capture_slots = self._create_capture_grid(self.right_frame)
+        self.black_capture_slots = create_capture_grid(self.right_frame)
 
-        self.canvas = tk.Canvas(
-            self.center_frame,
-            width=self.board_px + 2 * self.margin,
-            height=self.board_px + 2 * self.margin,
-        )
+        self.canvas = tk.Canvas(self.center_frame, width=530, height=530)
         self.canvas.grid(row=0, column=0, columnspan=8, sticky="nsew")
         self.canvas.bind("<Configure>", self.on_canvas_resized)
+
+        self.renderer = BoardRenderer(self.canvas)
 
         self.white_model_var = tk.StringVar(value=self.model_choices[0])
         self.black_model_var = tk.StringVar(value=self.model_choices[0])
 
         tk.Label(self.center_frame, text="White model:").grid(row=1, column=0, sticky="e", padx=4, pady=(8, 0))
-        self.opt_white = tk.OptionMenu(self.center_frame, self.white_model_var, *self.model_choices, command=lambda _v: self.update_status())
+        self.opt_white = tk.OptionMenu(self.center_frame, self.white_model_var, *self.model_choices, command=lambda _: self.update_status())
         self.opt_white.grid(row=1, column=1, sticky="ew", padx=4, pady=(8, 0))
-
         tk.Label(self.center_frame, text="Black model:").grid(row=1, column=2, sticky="e", padx=4, pady=(8, 0))
-        self.opt_black = tk.OptionMenu(self.center_frame, self.black_model_var, *self.model_choices, command=lambda _v: self.update_status())
+        self.opt_black = tk.OptionMenu(self.center_frame, self.black_model_var, *self.model_choices, command=lambda _: self.update_status())
         self.opt_black.grid(row=1, column=3, sticky="ew", padx=4, pady=(8, 0))
 
         self.btn_play = tk.Button(self.center_frame, text="Play", command=self.start_autoplay)
         self.btn_play.grid(row=1, column=4, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_pause = tk.Button(self.center_frame, text="Pause", command=self.pause_autoplay)
         self.btn_pause.grid(row=1, column=5, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_step = tk.Button(self.center_frame, text="Step", command=self.step_once)
         self.btn_step.grid(row=1, column=6, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_new = tk.Button(self.center_frame, text="New Game", command=self.new_game)
         self.btn_new.grid(row=1, column=7, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_flip = tk.Button(self.center_frame, text="Flip Board", command=self.flip_board)
         self.btn_flip.grid(row=2, column=0, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_prev = tk.Button(self.center_frame, text="Prev", command=self.prev_move, state="disabled")
         self.btn_prev.grid(row=2, column=1, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_next = tk.Button(self.center_frame, text="Next", command=self.next_move, state="disabled")
         self.btn_next.grid(row=2, column=2, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_latest = tk.Button(self.center_frame, text="Latest", command=self.go_latest, state="disabled")
         self.btn_latest.grid(row=2, column=3, sticky="ew", padx=4, pady=(8, 0))
-
         self.btn_mark_bad = tk.Button(self.center_frame, text="Mark bad move", command=self.open_mark_bad_dialog)
         self.btn_mark_bad.grid(row=2, column=4, sticky="ew", padx=4, pady=(8, 0))
 
@@ -177,40 +145,43 @@ class ModelVsModelApp(tk.Tk):
         self.view_ply = 0
         self.flipped = False
         self.autoplay = False
+        self.board_history: list[chess.Board] = []
 
         self.roots = {
             chess.WHITE: Node(self.board.copy(stack=False)),
             chess.BLACK: Node(self.board.copy(stack=False)),
         }
 
-        self.bind("<Left>", lambda _e: self.prev_move())
-        self.bind("<Right>", lambda _e: self.next_move())
+        self.bind("<Left>", lambda _: self.prev_move())
+        self.bind("<Right>", lambda _: self.next_move())
 
         self.update_nav_buttons()
-        self.update_side_panels()
+        self._update_side_panels()
         self.update_status()
         self.draw()
 
-    def selected_model_path(self, color: chess.Color) -> str:
+    def selected_model_path(self, color):
         return self.white_model_var.get() if color == chess.WHITE else self.black_model_var.get()
 
-    def load_model(self, checkpoint_path: str) -> AlphaZeroNet:
-        key = checkpoint_path
-        if key in self.model_cache:
-            return self.model_cache[key]
-
-        net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(self.device)
+    def load_model(self, checkpoint_path):
+        if checkpoint_path in self.model_cache:
+            return self.model_cache[checkpoint_path]
+        net = AlphaZeroNet(in_channels=IN_CHANNELS, channels=self.channels,
+                           num_blocks=self.num_blocks).to(self.device)
         if checkpoint_path != "<untrained>" and os.path.exists(checkpoint_path):
-            payload = torch.load(checkpoint_path, map_location=self.device)
+            payload = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             if isinstance(payload, dict) and "model_state_dict" in payload:
+                ch = payload.get("channels", self.channels)
+                nb = payload.get("num_blocks", self.num_blocks)
+                if ch != self.channels or nb != self.num_blocks:
+                    net = AlphaZeroNet(in_channels=IN_CHANNELS, channels=ch, num_blocks=nb).to(self.device)
                 net.load_state_dict(payload["model_state_dict"])
             else:
                 net.load_state_dict(payload)
         else:
-            print(f"No checkpoint found at '{checkpoint_path}', using untrained model.")
-
+            print(f"No checkpoint at '{checkpoint_path}', using untrained model.")
         net.eval()
-        self.model_cache[key] = net
+        self.model_cache[checkpoint_path] = net
         return net
 
     def _cancel_autoplay_job(self):
@@ -232,7 +203,7 @@ class ModelVsModelApp(tk.Tk):
         self._cancel_autoplay_job()
         self.update_status("Autoplay paused.")
 
-    def _schedule_next_step(self, delay_ms: int | None = None):
+    def _schedule_next_step(self, delay_ms=None):
         self._cancel_autoplay_job()
         delay = self.move_delay_ms if delay_ms is None else int(delay_ms)
         self._autoplay_after_id = self.after(delay, self._play_step_autoplay)
@@ -248,14 +219,12 @@ class ModelVsModelApp(tk.Tk):
             self.pause_autoplay()
         self.play_one_move(schedule_next=False)
 
-    def play_one_move(self, schedule_next: bool):
+    def play_one_move(self, schedule_next):
         if self.board.is_game_over(claim_draw=True):
             self.finish_game()
             return
-
         if self.view_ply != len(self.moves):
             self.go_latest()
-
         color = self.board.turn
         checkpoint = self.selected_model_path(color)
         net = self.load_model(checkpoint)
@@ -267,42 +236,32 @@ class ModelVsModelApp(tk.Tk):
 
         with torch.inference_mode():
             _pi, action = mcts_policy_and_action(
-                net,
-                root=root,
-                num_sims=self.num_sims,
-                temperature=1e-6,
-                device=self.device,
+                net, root=root, num_sims=self.num_sims, temperature=1e-6,
+                device=self.device, history=self.board_history,
             )
-
         move = action_to_move(action)
         if move not in self.board.legal_moves:
             move = next(iter(self.board.legal_moves))
-
         self.sans.append(self.board.san(move))
+        self.board_history.append(self.board.copy(stack=False))
         self.board.push(move)
         self.moves.append(move)
-
         self.roots[chess.WHITE] = Node(self.board.copy(stack=False))
         self.roots[chess.BLACK] = Node(self.board.copy(stack=False))
-
         self.set_view_ply(len(self.moves))
-
         if self.board.is_game_over(claim_draw=True):
             self.finish_game()
             return
-
         if self.autoplay and schedule_next:
             self._schedule_next_step()
 
-    def finish_game(self, show_popup: bool = True):
+    def finish_game(self, show_popup=True):
         self.autoplay = False
         self._cancel_autoplay_job()
-
         res = self.board.result(claim_draw=True)
         white_name = os.path.basename(self.white_model_var.get())
         black_name = os.path.basename(self.black_model_var.get())
         pgn_path = save_pgn_from_moves(self.moves, res, self.pgn_dir, white_name, black_name)
-
         msg = f"Game over: {res}. Saved PGN: {pgn_path}"
         self.update_status(msg)
         if show_popup:
@@ -316,20 +275,22 @@ class ModelVsModelApp(tk.Tk):
         self.moves = []
         self.sans = []
         self.view_ply = 0
+        self.board_history = []
         self.roots = {
             chess.WHITE: Node(self.board.copy(stack=False)),
             chess.BLACK: Node(self.board.copy(stack=False)),
         }
         self.update_nav_buttons()
-        self.update_side_panels()
+        self._update_side_panels()
         self.update_status("New game.")
         self.draw()
 
     def flip_board(self):
         self.flipped = not self.flipped
+        self.renderer.flipped = self.flipped
         self.draw()
 
-    def update_status(self, extra: str = ""):
+    def update_status(self, extra=""):
         if self.view_ply == 0:
             move_info = "Start position"
         else:
@@ -337,7 +298,6 @@ class ModelVsModelApp(tk.Tk):
             move_no = (self.view_ply + 1) // 2
             turn_side = "White" if self.view_ply % 2 == 1 else "Black"
             move_info = f"Move {move_no} ({turn_side}): {san}"
-
         turn = "White" if self.board.turn == chess.WHITE else "Black"
         base = (
             f"White={os.path.basename(self.white_model_var.get())} | "
@@ -350,7 +310,7 @@ class ModelVsModelApp(tk.Tk):
             base += f". {extra}"
         self.lbl.config(text=base)
 
-    def board_before_ply(self, ply: int) -> chess.Board:
+    def board_before_ply(self, ply):
         b = chess.Board()
         for i in range(max(0, ply)):
             b.push(self.moves[i])
@@ -360,7 +320,6 @@ class ModelVsModelApp(tk.Tk):
         if self.view_ply <= 0 or self.view_ply > len(self.moves):
             messagebox.showinfo("Mark bad move", "Navigate to a played move first (use Prev/Next).")
             return
-
         bad_idx = self.view_ply - 1
         board = self.board_before_ply(bad_idx)
         bad_move = self.moves[bad_idx]
@@ -372,8 +331,7 @@ class ModelVsModelApp(tk.Tk):
         win.resizable(False, False)
 
         tk.Label(win, text=f"Ply {self.view_ply} bad move: {bad_san} ({bad_move.uci()})", anchor="w").grid(
-            row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4)
-        )
+            row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4))
         tk.Label(win, text="Select better move:").grid(row=1, column=0, sticky="ne", padx=10, pady=4)
 
         list_frame = tk.Frame(win)
@@ -385,11 +343,8 @@ class ModelVsModelApp(tk.Tk):
         scroll.grid(row=0, column=1, sticky="ns")
 
         legal_moves = list(board.legal_moves)
-        legal_display: list[tuple[str, chess.Move]] = []
-        for mv in legal_moves:
-            legal_display.append((f"{board.san(mv):8s}  ({mv.uci()})", mv))
-        legal_display.sort(key=lambda x: x[0])
-        for txt, _mv in legal_display:
+        legal_display = sorted([(f"{board.san(mv):8s}  ({mv.uci()})", mv) for mv in legal_moves], key=lambda x: x[0])
+        for txt, _ in legal_display:
             good_move_list.insert("end", txt)
 
         tk.Label(win, text="Confidence:").grid(row=2, column=0, sticky="e", padx=10, pady=4)
@@ -413,15 +368,8 @@ class ModelVsModelApp(tk.Tk):
             if good_move == bad_move:
                 messagebox.showerror("Mark bad move", "Preferred move must be different from bad move.")
                 return
-
-            row = {
-                "fen": fen,
-                "bad_move": bad_move.uci(),
-                "good_move": good_move.uci(),
-                "confidence": conf_var.get(),
-                "source": "model_vs_model_gui",
-                "ply": int(self.view_ply),
-            }
+            row = {"fen": fen, "bad_move": bad_move.uci(), "good_move": good_move.uci(),
+                   "confidence": conf_var.get(), "source": "model_vs_model_gui", "ply": int(self.view_ply)}
             wtxt = weight_var.get().strip()
             if wtxt:
                 try:
@@ -429,84 +377,37 @@ class ModelVsModelApp(tk.Tk):
                 except Exception:
                     messagebox.showerror("Mark bad move", f"Weight must be a number, got: {wtxt}")
                     return
-
             out_path = out_var.get().strip() or "feedback.jsonl"
             out_dir = os.path.dirname(out_path)
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
             with open(out_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
-
             self.feedback_out_path = out_path
-            self.update_status(
-                f"Saved feedback ply {self.view_ply}: bad={bad_move.uci()} good={good_move.uci()} -> {out_path}"
-            )
+            self.update_status(f"Saved feedback ply {self.view_ply}: bad={bad_move.uci()} good={good_move.uci()} -> {out_path}")
             win.destroy()
 
         btn_row = tk.Frame(win)
         btn_row.grid(row=5, column=0, columnspan=2, sticky="e", padx=10, pady=(8, 10))
         tk.Button(btn_row, text="Save", width=10, command=submit).pack(side="left", padx=4)
         tk.Button(btn_row, text="Cancel", width=10, command=win.destroy).pack(side="left", padx=4)
-
-        def on_double_click(_event):
-            submit()
-
-        good_move_list.bind("<Double-Button-1>", on_double_click)
+        good_move_list.bind("<Double-Button-1>", lambda _: submit())
         if legal_display:
             good_move_list.selection_set(0)
-
         win.transient(self)
         win.grab_set()
 
-    def _create_capture_grid(self, parent: tk.Widget) -> list[tk.Label]:
-        box = tk.Frame(parent, relief="groove", bd=1, padx=4, pady=4)
-        box.pack(anchor="n", fill="x", pady=(6, 0))
-        for col in range(5):
-            box.grid_columnconfigure(col, weight=1)
-        slots: list[tk.Label] = []
-        for row in range(3):
-            box.grid_rowconfigure(row, weight=1)
-            for col in range(5):
-                lbl = tk.Label(box, text=" ", font=("Arial", 18), width=1, anchor="center")
-                lbl.grid(row=row, column=col, sticky="nsew")
-                slots.append(lbl)
-        return slots
-
-    def recompute_captures(self):
-        b = chess.Board()
-        white_taken = []
-        black_taken = []
-        for i in range(self.view_ply):
-            mv = self.moves[i]
-            mover_is_white = b.turn == chess.WHITE
-            captured_symbol = None
-            if b.is_en_passant(mv):
-                captured_symbol = "p" if mover_is_white else "P"
-            elif b.is_capture(mv):
-                cap_piece = b.piece_at(mv.to_square)
-                if cap_piece is not None:
-                    captured_symbol = cap_piece.symbol()
-            b.push(mv)
-            if captured_symbol is not None:
-                if mover_is_white:
-                    white_taken.append(UNICODE_PIECE[captured_symbol])
-                else:
-                    black_taken.append(UNICODE_PIECE[captured_symbol])
-        return white_taken, black_taken
-
-    def update_side_panels(self):
-        wcap, bcap = self.recompute_captures()
-        for i, lbl in enumerate(self.white_capture_slots):
-            lbl.config(text=wcap[i] if i < len(wcap) else " ")
-        for i, lbl in enumerate(self.black_capture_slots):
-            lbl.config(text=bcap[i] if i < len(bcap) else " ")
+    def _update_side_panels(self):
+        wcap, bcap = recompute_captures(self.moves, self.view_ply)
+        update_capture_display(self.white_capture_slots, wcap)
+        update_capture_display(self.black_capture_slots, bcap)
 
     def update_nav_buttons(self):
         self.btn_prev.config(state="normal" if self.view_ply > 0 else "disabled")
         self.btn_next.config(state="normal" if self.view_ply < len(self.moves) else "disabled")
         self.btn_latest.config(state="normal" if self.view_ply < len(self.moves) else "disabled")
 
-    def set_view_ply(self, target_ply: int):
+    def set_view_ply(self, target_ply):
         target = max(0, min(target_ply, len(self.moves)))
         b = chess.Board()
         for i in range(target):
@@ -514,7 +415,7 @@ class ModelVsModelApp(tk.Tk):
         self.view_board = b
         self.view_ply = target
         self.update_nav_buttons()
-        self.update_side_panels()
+        self._update_side_panels()
         self.update_status()
         self.draw()
 
@@ -532,129 +433,26 @@ class ModelVsModelApp(tk.Tk):
             self.after_cancel(self._resize_after_id)
         self._resize_after_id = self.after(30, self.draw)
 
-    def square_to_pixel_center(self, sq: int):
-        file_ = chess.square_file(sq)
-        rank_ = chess.square_rank(sq)
-        r = 7 - rank_
-        c = file_
-        if self.flipped:
-            r = 7 - r
-            c = 7 - c
-        x = self.board_origin_x + c * self.square + self.square / 2
-        y = self.board_origin_y + r * self.square + self.square / 2
-        return x, y
-
-    def square_to_rect(self, sq: int):
-        file_ = chess.square_file(sq)
-        rank_ = chess.square_rank(sq)
-        r = 7 - rank_
-        c = file_
-        if self.flipped:
-            r = 7 - r
-            c = 7 - c
-        x0 = self.board_origin_x + c * self.square
-        y0 = self.board_origin_y + r * self.square
-        x1 = x0 + self.square
-        y1 = y0 + self.square
-        return x0, y0, x1, y1
-
     def draw(self):
         self._resize_after_id = None
-        self.canvas.delete("all")
-
-        light = "#EEEED2"
-        dark = "#769656"
-        canvas_w = self.canvas.winfo_width()
-        canvas_h = self.canvas.winfo_height()
-        if canvas_w < 50 or canvas_h < 50:
-            canvas_w = self.board_px + 2 * self.margin
-            canvas_h = self.board_px + 2 * self.margin
-
-        reserve_left = max(16, int(canvas_w * 0.03))
-        reserve_bottom = max(16, int(canvas_h * 0.03))
-        board_px = max(
-            160,
-            min(
-                canvas_w - 2 * self.margin - reserve_left,
-                canvas_h - 2 * self.margin - reserve_bottom,
-            ),
-        )
-        self.board_px = board_px
-        self.square = board_px / 8
-        self.coord_left_pad = max(12, int(self.square * 0.35))
-        self.coord_bottom_pad = max(12, int(self.square * 0.35))
-        self.board_origin_x = (canvas_w - board_px - self.coord_left_pad) / 2 + self.coord_left_pad
-        self.board_origin_y = (canvas_h - board_px - self.coord_bottom_pad) / 2
-        piece_font = max(18, int(self.square * 0.58))
-
-        for r in range(8):
-            for c in range(8):
-                x0 = self.board_origin_x + c * self.square
-                y0 = self.board_origin_y + r * self.square
-                x1 = x0 + self.square
-                y1 = y0 + self.square
-                color = light if (r + c) % 2 == 0 else dark
-                self.canvas.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
-
-        if self.view_ply > 0:
-            mv = self.moves[self.view_ply - 1]
-            self._highlight_square(mv.from_square, outline="red")
-            self._highlight_square(mv.to_square, outline="red")
-
-        for sq, piece in self.view_board.piece_map().items():
-            x, y = self.square_to_pixel_center(sq)
-            ch = UNICODE_PIECE[piece.symbol()]
-            self.canvas.create_text(x, y, text=ch, font=("Arial", piece_font), fill="#111")
-
-        self._draw_coordinates()
+        last_move = self.moves[self.view_ply - 1] if self.view_ply > 0 else None
+        self.renderer.draw(self.view_board, last_move=last_move)
         self.update_idletasks()
-
-    def _draw_coordinates(self):
-        label_font = ("Arial", max(9, int(self.square * 0.16)))
-        text_color = "#333333"
-
-        files = list("abcdefgh")
-        if self.flipped:
-            files = list(reversed(files))
-        for c in range(8):
-            x = self.board_origin_x + c * self.square + self.square / 2
-            y = self.board_origin_y + self.board_px + self.coord_bottom_pad * 0.55
-            self.canvas.create_text(x, y, text=files[c], font=label_font, fill=text_color)
-
-        ranks = [str(r) for r in range(8, 0, -1)]
-        if self.flipped:
-            ranks = list(reversed(ranks))
-        for r in range(8):
-            x = self.board_origin_x - self.coord_left_pad * 0.55
-            y = self.board_origin_y + r * self.square + self.square / 2
-            self.canvas.create_text(x, y, text=ranks[r], font=label_font, fill=text_color)
-
-    def _highlight_square(self, sq: int, outline="red"):
-        x0, y0, x1, y1 = self.square_to_rect(sq)
-        inset = max(2, int(self.square * 0.04))
-        self.canvas.create_rectangle(
-            x0 + inset,
-            y0 + inset,
-            x1 - inset,
-            y1 - inset,
-            outline=outline,
-            width=max(2, int(self.square * 0.05)),
-        )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a local GUI model-vs-model game in real time.")
-    parser.add_argument("--device", type=str, default="cpu", help="cpu or cuda")
-    parser.add_argument("--num_sims", type=int, default=50, help="MCTS simulations per move")
-    parser.add_argument("--move_delay_ms", type=int, default=400, help="Delay between model moves")
-    parser.add_argument("--pgn_dir", type=str, default=DEFAULT_PGN_DIR, help="Directory to save PGN files")
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--num_sims", type=int, default=50)
+    parser.add_argument("--move_delay_ms", type=int, default=400)
+    parser.add_argument("--pgn_dir", type=str, default=DEFAULT_PGN_DIR)
+    parser.add_argument("--channels", type=int, default=128)
+    parser.add_argument("--num_blocks", type=int, default=10)
     args = parser.parse_args()
 
     os.makedirs(args.pgn_dir, exist_ok=True)
     app = ModelVsModelApp(
-        device=args.device,
-        num_sims=args.num_sims,
-        pgn_dir=args.pgn_dir,
-        move_delay_ms=args.move_delay_ms,
+        device=args.device, num_sims=args.num_sims, pgn_dir=args.pgn_dir,
+        move_delay_ms=args.move_delay_ms, channels=args.channels, num_blocks=args.num_blocks,
     )
     app.mainloop()

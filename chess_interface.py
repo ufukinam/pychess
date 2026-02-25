@@ -54,6 +54,8 @@ def cmd_train_selfplay(args: argparse.Namespace) -> int:
         cmd.append("--stop_on_repeat2")
     if args.use_material_shaping:
         cmd.append("--use_material_shaping")
+    if getattr(args, "augment", False):
+        cmd.append("--augment")
     return _run(cmd)
 
 
@@ -196,8 +198,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--train_batches", type=int, default=32, help="Gradient batches per iteration.")
     sp.add_argument("--lr", type=float, default=1e-4, help="Learning rate for self-play updates.")
     sp.add_argument("--replay_dir", type=str, default="replay", help="Replay shard directory.")
-    sp.add_argument("--num_sims", type=int, default=100, help="MCTS sims per self-play move.")
-    sp.add_argument("--eval_num_sims", type=int, default=25, help="MCTS sims for evaluations.")
+    sp.add_argument("--num_sims", type=int, default=400, help="MCTS sims per self-play move.")
+    sp.add_argument("--eval_num_sims", type=int, default=50, help="MCTS sims for evaluations.")
     sp.add_argument("--draw_penalty", type=float, default=0.0, help="Target value for draw-like outcomes.")
     sp.add_argument("--stop_on_threefold", action="store_true", help="Stop games on claimable threefold repetition.")
     sp.add_argument("--no_progress_limit", type=int, default=30, help="Halfmove cutoff for no-progress stop.")
@@ -211,13 +213,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--early_sims", type=int, default=0, help="Opening sims per move (0=use num_sims).")
     sp.add_argument("--early_plies", type=int, default=16, help="Opening plies for early_sims.")
     sp.add_argument("--late_sims", type=int, default=0, help="Late-game sims per move (0=use num_sims).")
-    sp.add_argument("--gate_games", type=int, default=8, help="Gating games vs previous model (0 disables).")
-    sp.add_argument("--gate_min_score", type=float, default=0.55, help="Minimum gate score to accept update.")
+    sp.add_argument("--gate_games", type=int, default=30, help="Gating games vs previous model (0 disables).")
+    sp.add_argument("--gate_min_score", type=float, default=0.52, help="Minimum gate score to accept update.")
     sp.add_argument("--feedback_jsonl", type=str, default="", help="Optional JSONL with (fen, bad_move, good_move) feedback pairs.")
     sp.add_argument("--feedback_weight", type=float, default=0.2, help="Weight for feedback ranking loss (0 disables feedback).")
     sp.add_argument("--feedback_batch_size", type=int, default=32, help="Feedback batch size per train update.")
     sp.add_argument("--feedback_margin", type=float, default=0.2, help="Required logit margin for good over bad move.")
     sp.add_argument("--feedback_max_samples", type=int, default=0, help="Optional cap for loaded feedback samples (0=all).")
+    sp.add_argument("--augment", action="store_true", help="Enable color-flip augmentation on replay batches.")
     sp.set_defaults(func=cmd_train_selfplay)
 
     sp = sub.add_parser(

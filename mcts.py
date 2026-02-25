@@ -1,19 +1,15 @@
-# mcts.py  (REPLACEMENT - faster + correct tree)
 from __future__ import annotations
 
 """
-Monte Carlo Tree Search (MCTS) for move selection.
+Monte Carlo Tree Search (MCTS) with position-history propagation.
 
-Big picture:
+Core loop:
 1. Use the neural net to evaluate positions (policy + value).
-2. Run many search simulations from the current position.
-3. Use visit counts from the root as an improved policy target and move choice.
+2. Run many simulations from the current position.
+3. Return root visit counts as an improved policy target.
 
-External library usage:
-- `math`: fast scalar math (`sqrt`) for PUCT exploration term.
-- `numpy`: vector math and random sampling.
-- `python-chess`: legal move handling and board transitions.
-- `torch`: model inference without gradient tracking.
+History is threaded through the search so that each leaf evaluation
+receives the full sequence of past boards (from the game + the search path).
 """
 
 import math
@@ -21,16 +17,15 @@ import numpy as np
 import chess
 import torch
 
-from encode import ACTION_SIZE, legal_mask, board_to_tensor
+from encode import ACTION_SIZE, IN_CHANNELS, legal_mask, board_to_tensor, action_to_move
 
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
 
 def softmax_masked(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """
-    Softmax over legal moves only.
-
-    Why: raw model logits include illegal actions due to fixed action space.
-    Illegal actions get near-zero probability before MCTS uses priors.
-    """
+    """Numerically-stable softmax restricted to legal moves."""
     x = logits.copy()
     x[~mask] = -1e9
     x = x - np.max(x)
@@ -46,10 +41,7 @@ def softmax_masked(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 def terminal_value_from_to_play(board: chess.Board) -> float:
-    """
-    Terminal value from perspective of player-to-move at this board.
-    +1 means player-to-move is the winner in this terminal state, -1 loser, 0 draw.
-    """
+    """Terminal value from the side-to-move's perspective (+1 win, -1 loss, 0 draw)."""
     res = board.result(claim_draw=True)
     if res == "1-0":
         white_value = 1.0
@@ -60,15 +52,16 @@ def terminal_value_from_to_play(board: chess.Board) -> float:
     return white_value if board.turn == chess.WHITE else -white_value
 
 
-@torch.inference_mode()
-def eval_position(net, board: chess.Board, device: str = "cpu"):
-    """
-    Run one forward pass of the network for a single board.
+# ------------------------------------------------------------------
+# Neural-net evaluation
+# ------------------------------------------------------------------
 
-    `@torch.inference_mode()` disables autograd and saves memory/compute.
-    """
-    x = board_to_tensor(board)
-    xt = torch.from_numpy(x).unsqueeze(0).to(device)  # (1, C, 8, 8)
+@torch.inference_mode()
+def eval_position(net, board: chess.Board, device: str = "cpu",
+                  history: list[chess.Board] | None = None):
+    """Forward pass returning (policy, value, legal_mask)."""
+    x = board_to_tensor(board, history=history)
+    xt = torch.from_numpy(x).unsqueeze(0).to(device)
     logits, value = net(xt)
     logits = logits.squeeze(0).cpu().numpy()
     value = float(value.item())
@@ -78,47 +71,40 @@ def eval_position(net, board: chess.Board, device: str = "cpu"):
     return policy, value, mask
 
 
+# ------------------------------------------------------------------
+# Node
+# ------------------------------------------------------------------
+
 class Node:
-    """One search tree node storing edge statistics for outgoing actions."""
+    """One search-tree node storing edge statistics for outgoing actions."""
 
     __slots__ = (
-        "board",
-        "to_play",
-        "is_expanded",
-        "terminal",
-        "terminal_v",
-        "P",              # dict[action]->prior
-        "N",              # dict[action]->visits
-        "W",              # dict[action]->total value
-        "children",       # dict[action]->Node
-        "legal_actions",  # np.ndarray[int]
-        "sum_N",
+        "board", "to_play", "is_expanded", "terminal", "terminal_v",
+        "P", "N", "W", "children", "legal_actions", "sum_N",
     )
 
     def __init__(self, board: chess.Board):
         self.board = board
         self.to_play = board.turn
         self.is_expanded = False
-
         self.terminal = False
         self.terminal_v = 0.0
-
-        self.P = {}
-        self.N = {}
-        self.W = {}
-        self.children = {}
-        self.legal_actions = None
+        self.P: dict[int, float] = {}
+        self.N: dict[int, int] = {}
+        self.W: dict[int, float] = {}
+        self.children: dict[int, Node] = {}
+        self.legal_actions: np.ndarray | None = None
         self.sum_N = 0
 
 
-def expand_node(node: Node, net, device: str, add_dirichlet: bool,
-                dirichlet_alpha: float, dirichlet_eps: float) -> float:
-    """
-    Expand one node by evaluating policy/value and initializing edge stats.
+# ------------------------------------------------------------------
+# Expand / Select
+# ------------------------------------------------------------------
 
-    Dirichlet noise is added only at root in self-play to encourage exploration.
-    """
-    # Terminal?
+def expand_node(node: Node, net, device: str, add_dirichlet: bool,
+                dirichlet_alpha: float, dirichlet_eps: float,
+                history: list[chess.Board] | None = None) -> float:
+    """Evaluate and expand a leaf node, returning value from side-to-move."""
     if node.board.is_game_over(claim_draw=True):
         node.terminal = True
         node.terminal_v = terminal_value_from_to_play(node.board)
@@ -126,10 +112,9 @@ def expand_node(node: Node, net, device: str, add_dirichlet: bool,
         node.legal_actions = np.array([], dtype=np.int32)
         return float(node.terminal_v)
 
-    policy, v, mask = eval_position(net, node.board, device=device)
+    policy, v, mask = eval_position(net, node.board, device=device, history=history)
     legal = np.flatnonzero(mask).astype(np.int32)
     node.legal_actions = legal
-
     node.P = {}
     node.N = {}
     node.W = {}
@@ -152,12 +137,10 @@ def expand_node(node: Node, net, device: str, add_dirichlet: bool,
     return float(v)
 
 
-
 def select_action(node: Node, c_puct: float) -> int:
-    # PUCT: choose action balancing value estimate (Q) and exploration bonus (U).
+    """PUCT action selection balancing Q-value and exploration bonus."""
     best_a = None
     best_score = -1e30
-
     sqrt_sum = math.sqrt(node.sum_N + 1e-8)
 
     for a in node.legal_actions:
@@ -172,18 +155,12 @@ def select_action(node: Node, c_puct: float) -> int:
             best_score = score
             best_a = a
 
-    # legal_actions should never be empty for non-terminal
     return int(best_a)
 
 
-def action_to_move(action: int) -> chess.Move:
-    """Decode integer action id back into a `python-chess` move."""
-    frm = action // (64 * 5)
-    to = (action // 5) % 64
-    promo_idx = action % 5
-    promo = None if promo_idx == 0 else {1: chess.KNIGHT, 2: chess.BISHOP, 3: chess.ROOK, 4: chess.QUEEN}[promo_idx]
-    return chess.Move(frm, to, promotion=promo)
-
+# ------------------------------------------------------------------
+# Main MCTS loop
+# ------------------------------------------------------------------
 
 def mcts_run(
     net,
@@ -193,25 +170,27 @@ def mcts_run(
     dirichlet_alpha: float = 0.3,
     dirichlet_eps: float = 0.25,
     device: str = "cpu",
+    history: list[chess.Board] | None = None,
 ):
     """
-    Run full MCTS simulation loop.
+    Run *num_sims* MCTS simulations from *root*.
 
-    Core phases:
-    - Selection: follow best PUCT actions down the tree.
-    - Expansion: evaluate an unexpanded leaf with the network.
-    - Backup: propagate value back up, flipping sign each ply.
+    *history* is the list of past board snapshots leading up to root's
+    position (oldest first).  During each simulation the search path
+    is appended so that leaf evaluations receive full context.
     """
-    # Ensure root expanded (Dirichlet noise typically only at root).
+    root_history = list(history) if history else []
+
     if not root.is_expanded:
-        _ = expand_node(root, net, device, add_dirichlet=True,
-                        dirichlet_alpha=dirichlet_alpha, dirichlet_eps=dirichlet_eps)
+        expand_node(root, net, device, add_dirichlet=True,
+                    dirichlet_alpha=dirichlet_alpha, dirichlet_eps=dirichlet_eps,
+                    history=root_history)
 
     for _ in range(num_sims):
         node = root
-        path = []  # list of (node, action)
+        path: list[tuple[Node, int]] = []
+        sim_history = list(root_history)
 
-        # Selection / Expansion
         while True:
             if node.terminal:
                 v = node.terminal_v
@@ -219,20 +198,19 @@ def mcts_run(
 
             if not node.is_expanded:
                 v = expand_node(node, net, device, add_dirichlet=False,
-                                dirichlet_alpha=dirichlet_alpha, dirichlet_eps=dirichlet_eps)
-                # v is value from perspective of player-to-move at this node
+                                dirichlet_alpha=dirichlet_alpha,
+                                dirichlet_eps=dirichlet_eps,
+                                history=sim_history)
                 break
 
-            # Select
             a = select_action(node, c_puct)
             path.append((node, a))
+            sim_history.append(node.board)
 
-            # Descend/create child node
             child = node.children.get(a)
             if child is None:
                 b2 = node.board.copy(stack=False)
                 mv = action_to_move(a)
-                # If mapping bug, treat as drawish
                 if mv not in b2.legal_moves:
                     v = 0.0
                     break
@@ -241,19 +219,21 @@ def mcts_run(
                 node.children[a] = child
             node = child
 
-        # Backup: `v` starts from leaf player-to-move perspective.
         for parent, action in reversed(path):
             if v is None:
                 v = 0.0
             parent.N[action] += 1
             parent.sum_N += 1
-            # Stored edge values are from parent-to-move perspective.
             parent.W[action] += -v
-            v = -v  # Switch perspective as we move one ply upward.
+            v = -v
 
+
+# ------------------------------------------------------------------
+# Policy extraction & action picking
+# ------------------------------------------------------------------
 
 def root_pi_from_visits(root: Node) -> np.ndarray:
-    """Convert root visit counts into a policy distribution used for training."""
+    """Convert root visit counts into a training-target policy distribution."""
     pi = np.zeros((ACTION_SIZE,), dtype=np.float32)
     if root.sum_N <= 0:
         return pi
@@ -264,12 +244,7 @@ def root_pi_from_visits(root: Node) -> np.ndarray:
 
 
 def pick_action_from_pi(pi: np.ndarray, temperature: float) -> int:
-    """
-    Sample/choose an action from policy `pi`.
-
-    - low temperature -> near-greedy move choice
-    - high temperature -> more exploratory sampling
-    """
+    """Sample an action from *pi* at the given temperature."""
     if temperature <= 1e-6:
         return int(np.argmax(pi))
     p = np.power(pi, 1.0 / temperature)
@@ -289,11 +264,9 @@ def mcts_policy_and_action(
     c_puct: float = 1.5,
     dirichlet_alpha: float = 0.3,
     dirichlet_eps: float = 0.25,
+    history: list[chess.Board] | None = None,
 ):
-    """
-    Runs MCTS starting from `root` (which holds a board).
-    Returns (pi, chosen_action).
-    """
+    """Run MCTS then return (pi, chosen_action)."""
     mcts_run(
         net, root,
         num_sims=num_sims,
@@ -301,6 +274,7 @@ def mcts_policy_and_action(
         dirichlet_alpha=dirichlet_alpha,
         dirichlet_eps=dirichlet_eps,
         device=device,
+        history=history,
     )
     pi = root_pi_from_visits(root)
     action = pick_action_from_pi(pi, temperature)
@@ -308,10 +282,7 @@ def mcts_policy_and_action(
 
 
 def reuse_root_after_action(root: Node, action: int) -> Node:
-    """
-    Tree reuse optimization: after playing `action`, move root to its child.
-    If child doesn't exist, create it.
-    """
+    """Tree reuse: advance root to the child for *action*."""
     child = root.children.get(action)
     if child is None:
         b2 = root.board.copy(stack=False)
