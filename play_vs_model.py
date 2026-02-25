@@ -569,11 +569,21 @@ class PlayVsModel(tk.Tk):
             canvas_w = self.board_px + 2 * self.margin
             canvas_h = self.board_px + 2 * self.margin
 
-        board_px = max(160, min(canvas_w - 2 * self.margin, canvas_h - 2 * self.margin))
+        reserve_left = max(16, int(canvas_w * 0.03))
+        reserve_bottom = max(16, int(canvas_h * 0.03))
+        board_px = max(
+            160,
+            min(
+                canvas_w - 2 * self.margin - reserve_left,
+                canvas_h - 2 * self.margin - reserve_bottom,
+            ),
+        )
         self.board_px = board_px
         self.square = board_px / 8
-        self.board_origin_x = (canvas_w - board_px) / 2
-        self.board_origin_y = (canvas_h - board_px) / 2
+        self.coord_left_pad = max(12, int(self.square * 0.35))
+        self.coord_bottom_pad = max(12, int(self.square * 0.35))
+        self.board_origin_x = (canvas_w - board_px - self.coord_left_pad) / 2 + self.coord_left_pad
+        self.board_origin_y = (canvas_h - board_px - self.coord_bottom_pad) / 2
         piece_font = max(18, int(self.square * 0.58))
 
         for r in range(8):
@@ -598,7 +608,28 @@ class PlayVsModel(tk.Tk):
             ch = UNICODE_PIECE[piece.symbol()]
             self.canvas.create_text(x, y, text=ch, font=("Arial", piece_font), fill="#111")
 
+        self._draw_coordinates()
         self.update_idletasks()
+
+    def _draw_coordinates(self):
+        label_font = ("Arial", max(9, int(self.square * 0.16)))
+        text_color = "#333333"
+
+        files = list("abcdefgh")
+        if self.flipped:
+            files = list(reversed(files))
+        for c in range(8):
+            x = self.board_origin_x + c * self.square + self.square / 2
+            y = self.board_origin_y + self.board_px + self.coord_bottom_pad * 0.55
+            self.canvas.create_text(x, y, text=files[c], font=label_font, fill=text_color)
+
+        ranks = [str(r) for r in range(8, 0, -1)]
+        if self.flipped:
+            ranks = list(reversed(ranks))
+        for r in range(8):
+            x = self.board_origin_x - self.coord_left_pad * 0.55
+            y = self.board_origin_y + r * self.square + self.square / 2
+            self.canvas.create_text(x, y, text=ranks[r], font=label_font, fill=text_color)
 
     def _highlight_square(self, sq: int, outline="red"):
         x0, y0, x1, y1 = self.square_to_rect(sq)

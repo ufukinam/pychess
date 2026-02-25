@@ -40,6 +40,12 @@ def cmd_train_selfplay(args: argparse.Namespace) -> int:
     cmd += ["--late_sims", str(args.late_sims)]
     cmd += ["--gate_games", str(args.gate_games)]
     cmd += ["--gate_min_score", str(args.gate_min_score)]
+    cmd += ["--feedback_weight", str(args.feedback_weight)]
+    cmd += ["--feedback_batch_size", str(args.feedback_batch_size)]
+    cmd += ["--feedback_margin", str(args.feedback_margin)]
+    cmd += ["--feedback_max_samples", str(args.feedback_max_samples)]
+    if args.feedback_jsonl:
+        cmd += ["--feedback_jsonl", args.feedback_jsonl]
     if args.prefer_puzzle_init:
         cmd.append("--prefer_puzzle_init")
     if args.stop_on_threefold:
@@ -130,6 +136,29 @@ def cmd_pgn_viewer(args: argparse.Namespace) -> int:
     return _run(cmd)
 
 
+def cmd_model_vs_model(args: argparse.Namespace) -> int:
+    cmd = _py("model_vs_model.py")
+    cmd += ["--device", args.device]
+    cmd += ["--num_sims", str(args.num_sims)]
+    cmd += ["--move_delay_ms", str(args.move_delay_ms)]
+    cmd += ["--pgn_dir", args.pgn_dir]
+    return _run(cmd)
+
+
+def cmd_generate_feedback_candidates(args: argparse.Namespace) -> int:
+    cmd = _py("generate_feedback_candidates.py")
+    cmd += ["--pgn_glob", args.pgn_glob]
+    cmd += ["--out", args.out]
+    cmd += ["--max_games", str(args.max_games)]
+    cmd += ["--max_plies_per_game", str(args.max_plies_per_game)]
+    cmd += ["--min_ply", str(args.min_ply)]
+    cmd += ["--side", args.side]
+    cmd += ["--max_legal_moves", str(args.max_legal_moves)]
+    if args.recursive:
+        cmd.append("--recursive")
+    return _run(cmd)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
@@ -184,6 +213,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--late_sims", type=int, default=0, help="Late-game sims per move (0=use num_sims).")
     sp.add_argument("--gate_games", type=int, default=8, help="Gating games vs previous model (0 disables).")
     sp.add_argument("--gate_min_score", type=float, default=0.55, help="Minimum gate score to accept update.")
+    sp.add_argument("--feedback_jsonl", type=str, default="", help="Optional JSONL with (fen, bad_move, good_move) feedback pairs.")
+    sp.add_argument("--feedback_weight", type=float, default=0.2, help="Weight for feedback ranking loss (0 disables feedback).")
+    sp.add_argument("--feedback_batch_size", type=int, default=32, help="Feedback batch size per train update.")
+    sp.add_argument("--feedback_margin", type=float, default=0.2, help="Required logit margin for good over bad move.")
+    sp.add_argument("--feedback_max_samples", type=int, default=0, help="Optional cap for loaded feedback samples (0=all).")
     sp.set_defaults(func=cmd_train_selfplay)
 
     sp = sub.add_parser(
@@ -321,6 +355,32 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--load_latest", action="store_true", help="Load latest PGN from games_dir.")
     sp.add_argument("--games_dir", type=str, default="games", help="Directory used by --load_latest.")
     sp.set_defaults(func=cmd_pgn_viewer)
+
+    sp = sub.add_parser(
+        "model-vs-model",
+        help="Launch model-vs-model GUI (model_vs_model.py).",
+        description="Run two selected checkpoints against each other in real time.",
+    )
+    sp.add_argument("--device", type=str, default="cpu", help="Inference device (cpu/cuda).")
+    sp.add_argument("--num_sims", type=int, default=50, help="MCTS simulations per move.")
+    sp.add_argument("--move_delay_ms", type=int, default=400, help="Delay between moves in milliseconds.")
+    sp.add_argument("--pgn_dir", type=str, default="model_games", help="Output directory for model-vs-model PGNs.")
+    sp.set_defaults(func=cmd_model_vs_model)
+
+    sp = sub.add_parser(
+        "generate-feedback-candidates",
+        help="Create candidate bad-move rows from PGNs (generate_feedback_candidates.py).",
+        description="Build JSONL candidate rows from many PGN files to speed up manual feedback labeling.",
+    )
+    sp.add_argument("--pgn_glob", type=str, default="model_games/*.pgn", help="Input PGN glob pattern.")
+    sp.add_argument("--recursive", action="store_true", help="Enable recursive glob matching (**).")
+    sp.add_argument("--out", type=str, default="feedback_candidates.jsonl", help="Output JSONL path.")
+    sp.add_argument("--max_games", type=int, default=0, help="Cap processed games (0 = all).")
+    sp.add_argument("--max_plies_per_game", type=int, default=0, help="Cap candidate plies per game (0 = all).")
+    sp.add_argument("--min_ply", type=int, default=1, help="Only include plies >= this 1-based index.")
+    sp.add_argument("--side", type=str, choices=("both", "white", "black"), default="both", help="Which mover side to include.")
+    sp.add_argument("--max_legal_moves", type=int, default=20, help="Hint list size for legal move UCIs (0 disables).")
+    sp.set_defaults(func=cmd_generate_feedback_candidates)
 
     return p
 

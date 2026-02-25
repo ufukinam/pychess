@@ -42,6 +42,7 @@ puzzle_cache_*/
 games/
 human_games/
 puzzle_games/
+model_games/
 
 # ---- Large puzzle datasets / generated CSVs ----
 lichess_db_puzzle.csv

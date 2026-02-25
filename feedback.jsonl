@@ -1,0 +1,8 @@
+{"fen": "r1bqk1nr/pppnb2p/3p4/4p1B1/8/3P1N1P/PPP1P3/RN1QKB1R w KQkq - 4 9", "bad_move": "b1d2", "good_move": "g5e7", "confidence": "medium", "source": "model_vs_model_gui", "ply": 17}
+{"fen": "r1bqk1nr/pp1n3p/3p3b/4p3/8/3P1N1P/PPP1P3/R2QKB1R w KQkq - 0 12", "bad_move": "d1d2", "good_move": "e2e4", "confidence": "medium", "source": "model_vs_model_gui", "ply": 23}
+{"fen": "r1b2knr/pp2q3/3p1n1p/4p1N1/4P3/3P3P/PPPK2B1/R5R1 w - - 0 18", "bad_move": "h3h4", "good_move": "g5f3", "confidence": "medium", "source": "model_vs_model_gui", "ply": 35}
+{"fen": "r1b2knr/pp2q3/3p1n1p/4p1N1/4P2P/3P4/PPPK2B1/R5R1 b - - 0 18", "bad_move": "c8g4", "good_move": "h6g5", "confidence": "medium", "source": "model_vs_model_gui", "ply": 36}
+{"fen": "r1bqkbnr/pppppppp/2n5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2", "bad_move": "e4e5", "good_move": "b1c3", "confidence": "medium", "source": "pgn_viewer_gui", "ply": 3, "source_pgn": "games\\game_20260223_152128_58374.pgn"}
+{"fen": "r1bqkbnr/p1pppppp/1pn5/4P3/5P2/8/PPPP2PP/RNBQKBNR b KQkq - 0 3", "bad_move": "c8a6", "good_move": "c8b7", "confidence": "medium", "source": "pgn_viewer_gui", "ply": 6, "source_pgn": "games\\game_20260223_152128_58374.pgn"}
+{"fen": "r2qkbnr/p1pppppp/bpn5/4P3/5P2/8/PPPP2PP/RNBQKBNR w KQkq - 1 4", "bad_move": "d1f3", "good_move": "f1a6", "confidence": "medium", "source": "pgn_viewer_gui", "ply": 7, "source_pgn": "games\\game_20260223_152128_58374.pgn"}
+{"fen": "r1bqkbnr/p1pppppp/1pn5/4P3/5P2/8/PPPP2PP/RNBQKBNR b KQkq - 0 3", "bad_move": "c8a6", "good_move": "c8b7", "confidence": "medium", "source": "pgn_viewer_gui", "ply": 6, "source_pgn": "games\\game_20260223_152128_58374.pgn"}

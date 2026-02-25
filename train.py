@@ -22,7 +22,8 @@ from torch.utils.tensorboard import SummaryWriter
 from net import AlphaZeroNet
 from selfplay import play_self_game
 from replay_store import save_shard, load_shards_into_buffer
-from selfplay_train_core import ReplayBuffer, train_step
+from selfplay_train_core import ReplayBuffer, train_step, train_step_with_feedback
+from feedback_train_data import FeedbackBuffer, load_feedback_jsonl
 from eval import eval_candidate_vs_baseline, eval_net_vs_random
 
 
@@ -69,6 +70,36 @@ def main():
     parser.add_argument("--late_sims", type=int, default=0, help="Mid/endgame sims per move (0=use num_sims).")
     parser.add_argument("--gate_games", type=int, default=8, help="Candidate-vs-baseline gating games per iter (0 disables).")
     parser.add_argument("--gate_min_score", type=float, default=0.55, help="Minimum gating score to accept candidate.")
+    parser.add_argument(
+        "--feedback_jsonl",
+        type=str,
+        default="",
+        help="Optional JSONL file with (fen, good_move, bad_move) feedback pairs.",
+    )
+    parser.add_argument(
+        "--feedback_weight",
+        type=float,
+        default=0.2,
+        help="Weight for feedback ranking loss (0 disables feedback even if provided).",
+    )
+    parser.add_argument(
+        "--feedback_batch_size",
+        type=int,
+        default=32,
+        help="Feedback batch size sampled each train batch.",
+    )
+    parser.add_argument(
+        "--feedback_margin",
+        type=float,
+        default=0.2,
+        help="Required logit margin between good and bad move in feedback ranking loss.",
+    )
+    parser.add_argument(
+        "--feedback_max_samples",
+        type=int,
+        default=0,
+        help="Optional cap on loaded feedback samples (0 means no cap).",
+    )
     args = parser.parse_args()
 
     # Optional CPU threading tweak (sometimes speeds up, sometimes slows down)
@@ -79,12 +110,26 @@ def main():
     opt = torch.optim.Adam(net.parameters(), lr=float(args.lr))
 
     rb = ReplayBuffer(maxlen=50000)
+    fb = FeedbackBuffer()
 
     os.makedirs("games", exist_ok=True)
     os.makedirs(args.replay_dir, exist_ok=True)
     os.makedirs("runs", exist_ok=True)
 
     writer = SummaryWriter(log_dir="runs/chesszero")
+
+    # Optional supervised preference feedback.
+    if args.feedback_jsonl:
+        fb_max = None if int(args.feedback_max_samples) <= 0 else int(args.feedback_max_samples)
+        if os.path.exists(args.feedback_jsonl):
+            fb_samples, fb_rejected = load_feedback_jsonl(args.feedback_jsonl, max_samples=fb_max)
+            fb.add_many(fb_samples)
+            print(
+                f"Loaded feedback samples: kept={len(fb_samples)} rejected={fb_rejected} "
+                f"path={args.feedback_jsonl}"
+            )
+        else:
+            print(f"Feedback file not found: {args.feedback_jsonl}")
 
     # Resume model: optionally transfer from puzzle-pretrained checkpoint.
     loaded_ckpt = None
@@ -179,7 +224,8 @@ def main():
         f"iters={iters} games_per_iter={games_per_iter} batch_size={batch_size} "
         f"train_batches={train_batches} lr={float(args.lr):.2e} "
         f"num_sims={int(args.num_sims)} eval_num_sims={int(args.eval_num_sims)} "
-        f"gate_games={int(args.gate_games)} gate_min_score={float(args.gate_min_score):.2f}"
+        f"gate_games={int(args.gate_games)} gate_min_score={float(args.gate_min_score):.2f} "
+        f"feedback_n={len(fb)} feedback_weight={float(args.feedback_weight):.2f}"
     )
     print(
         "[Setup] "
@@ -285,6 +331,7 @@ def main():
             writer.add_scalar("selfplay/repeat2_rate", repeat2_rate, it)
             writer.add_scalar("selfplay/avg_halfmove_clock_end", avg_halfmove_end, it)
             writer.add_scalar("replay/size", len(rb), it)
+            writer.add_scalar("feedback/size", len(fb), it)
 
             # -------- Train --------
             if len(rb) < batch_size:
@@ -294,16 +341,44 @@ def main():
             before_train_state = copy.deepcopy(net.state_dict())
             before_opt_state = copy.deepcopy(opt.state_dict())
             losses = []
+            use_feedback = (
+                len(fb) >= int(args.feedback_batch_size)
+                and float(args.feedback_weight) > 0.0
+            )
             for _ in range(train_batches):
                 s, pi, v = rb.sample(batch_size)
-                losses.append(train_step(net, opt, s, pi, v, device=device))
+                if use_feedback:
+                    fs, fgood, fbad, fw = fb.sample(int(args.feedback_batch_size))
+                    losses.append(
+                        train_step_with_feedback(
+                            net,
+                            opt,
+                            s,
+                            pi,
+                            v,
+                            fs,
+                            fgood,
+                            fbad,
+                            fw,
+                            device=device,
+                            feedback_weight=float(args.feedback_weight),
+                            feedback_margin=float(args.feedback_margin),
+                        )
+                    )
+                else:
+                    base_loss = train_step(net, opt, s, pi, v, device=device)
+                    losses.append((base_loss[0], base_loss[1], base_loss[2], 0.0))
 
             avg = np.mean(losses, axis=0)
-            print(f"Iter {it:03d} | loss={avg[0]:.4f} policy={avg[1]:.4f} value={avg[2]:.4f} | rb={len(rb)}")
+            print(
+                f"Iter {it:03d} | loss={avg[0]:.4f} policy={avg[1]:.4f} value={avg[2]:.4f} "
+                f"feedback={avg[3]:.4f} use_feedback={use_feedback} | rb={len(rb)}"
+            )
 
             writer.add_scalar("train/loss", avg[0], it)
             writer.add_scalar("train/policy_loss", avg[1], it)
             writer.add_scalar("train/value_loss", avg[2], it)
+            writer.add_scalar("train/feedback_loss", avg[3], it)
 
             accepted = True
             if int(args.gate_games) > 0:
