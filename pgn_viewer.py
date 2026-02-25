@@ -3,17 +3,16 @@ from __future__ import annotations
 import argparse
 import os
 import glob
+import json
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import chess
 import chess.pgn
 
-
-UNICODE_PIECE = {
-    "P": "♙", "N": "♘", "B": "♗", "R": "♖", "Q": "♕", "K": "♔",
-    "p": "♟", "n": "♞", "b": "♝", "r": "♜", "q": "♛", "k": "♚",
-}
+from chess_board_base import (
+    BoardRenderer, create_capture_grid, recompute_captures, update_capture_display,
+)
 
 
 class PGNViewer(tk.Tk):
@@ -32,6 +31,8 @@ class PGNViewer(tk.Tk):
         self._resize_after_id: str | None = None
         self.layout_mode = "wide"
         self.narrow_layout_width = 980
+        self.feedback_out_path = "feedback.jsonl"
+        self.current_pgn_path = ""
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1, minsize=170)
@@ -55,11 +56,11 @@ class PGNViewer(tk.Tk):
 
         # --- Left captured pieces (captured BY White) ---
         tk.Label(self.left_frame, text="White captured", font=("Arial", 12, "bold")).pack(anchor="n")
-        self.white_capture_slots = self._create_capture_grid(self.left_frame)
+        self.white_capture_slots = create_capture_grid(self.left_frame)
 
         # --- Right captured pieces (captured BY Black) ---
         tk.Label(self.right_frame, text="Black captured", font=("Arial", 12, "bold")).pack(anchor="n")
-        self.black_capture_slots = self._create_capture_grid(self.right_frame)
+        self.black_capture_slots = create_capture_grid(self.right_frame)
 
         # --- Board canvas ---
         self.canvas = tk.Canvas(
@@ -70,6 +71,7 @@ class PGNViewer(tk.Tk):
         self.canvas.grid(row=0, column=0, columnspan=5, sticky="nsew")
         self.canvas.bind("<Configure>", self.on_canvas_resized)
         self.center_frame.bind("<Configure>", self.on_center_resized)
+        self.renderer = BoardRenderer(self.canvas)
 
         # --- Controls ---
         self.btn_open = tk.Button(self.center_frame, text="Open PGN", command=self.open_pgn)
@@ -105,6 +107,14 @@ class PGNViewer(tk.Tk):
             command=self.on_slider_changed,
         )
         self.slider.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+
+        self.btn_mark_bad = tk.Button(
+            self.center_frame,
+            text="Mark bad move",
+            command=self.open_mark_bad_dialog,
+            state="disabled",
+        )
+        self.btn_mark_bad.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(8, 0))
 
         # --- Game state ---
         self.game: chess.pgn.Game | None = None
@@ -168,6 +178,7 @@ class PGNViewer(tk.Tk):
             self.game = game
             self.moves = moves
             self.sans = sans
+            self.current_pgn_path = path
 
             # jump to start
             self.set_ply_index(0)
@@ -175,6 +186,7 @@ class PGNViewer(tk.Tk):
             self.btn_reset.config(state="normal")
             self.btn_next.config(state="normal" if self.moves else "disabled")
             self.btn_prev.config(state="disabled")
+            self.btn_mark_bad.config(state="normal" if self.moves else "disabled")
 
             self.update_slider_range()
             self.update_status()
@@ -299,29 +311,128 @@ class PGNViewer(tk.Tk):
         if self.game is None:
             self.btn_prev.config(state="disabled")
             self.btn_next.config(state="disabled")
+            self.btn_mark_bad.config(state="disabled")
             return
         self.btn_prev.config(state="normal" if self.ply_index > 0 else "disabled")
         self.btn_next.config(state="normal" if self.ply_index < len(self.moves) else "disabled")
+        self.btn_mark_bad.config(state="normal" if self.ply_index > 0 else "disabled")
+
+    def board_before_ply(self, ply: int) -> chess.Board:
+        if self.game is None:
+            return chess.Board()
+        b = self.game.board()
+        for i in range(max(0, ply)):
+            b.push(self.moves[i])
+        return b
+
+    def open_mark_bad_dialog(self):
+        if self.game is None or self.ply_index <= 0 or self.ply_index > len(self.moves):
+            messagebox.showinfo("Mark bad move", "Navigate to a played move first.")
+            return
+
+        bad_idx = self.ply_index - 1
+        board = self.board_before_ply(bad_idx)
+        bad_move = self.moves[bad_idx]
+        bad_san = board.san(bad_move)
+        fen = board.fen()
+
+        win = tk.Toplevel(self)
+        win.title("Mark bad move")
+        win.resizable(False, False)
+
+        tk.Label(win, text=f"Ply {self.ply_index} bad move: {bad_san} ({bad_move.uci()})", anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4)
+        )
+        tk.Label(win, text="Select better move:").grid(row=1, column=0, sticky="ne", padx=10, pady=4)
+
+        list_frame = tk.Frame(win)
+        list_frame.grid(row=1, column=1, sticky="w", padx=(0, 10), pady=4)
+        good_move_list = tk.Listbox(list_frame, height=10, width=26, exportselection=False)
+        scroll = tk.Scrollbar(list_frame, orient="vertical", command=good_move_list.yview)
+        good_move_list.config(yscrollcommand=scroll.set)
+        good_move_list.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+
+        legal_moves = list(board.legal_moves)
+        legal_display: list[tuple[str, chess.Move]] = []
+        for mv in legal_moves:
+            legal_display.append((f"{board.san(mv):8s}  ({mv.uci()})", mv))
+        legal_display.sort(key=lambda x: x[0])
+        for txt, _mv in legal_display:
+            good_move_list.insert("end", txt)
+
+        tk.Label(win, text="Confidence:").grid(row=2, column=0, sticky="e", padx=10, pady=4)
+        conf_var = tk.StringVar(value="medium")
+        tk.OptionMenu(win, conf_var, "low", "medium", "high").grid(row=2, column=1, sticky="w", padx=(0, 10), pady=4)
+
+        tk.Label(win, text="Weight (optional):").grid(row=3, column=0, sticky="e", padx=10, pady=4)
+        weight_var = tk.StringVar(value="")
+        tk.Entry(win, textvariable=weight_var, width=22).grid(row=3, column=1, sticky="w", padx=(0, 10), pady=4)
+
+        tk.Label(win, text="Output JSONL:").grid(row=4, column=0, sticky="e", padx=10, pady=4)
+        out_var = tk.StringVar(value=self.feedback_out_path)
+        tk.Entry(win, textvariable=out_var, width=42).grid(row=4, column=1, sticky="w", padx=(0, 10), pady=4)
+
+        def submit():
+            selected = good_move_list.curselection()
+            if not selected:
+                messagebox.showerror("Mark bad move", "Select a better move from the list.")
+                return
+            good_move = legal_display[selected[0]][1]
+            if good_move == bad_move:
+                messagebox.showerror("Mark bad move", "Preferred move must be different from bad move.")
+                return
+
+            row = {
+                "fen": fen,
+                "bad_move": bad_move.uci(),
+                "good_move": good_move.uci(),
+                "confidence": conf_var.get(),
+                "source": "pgn_viewer_gui",
+                "ply": int(self.ply_index),
+            }
+            if self.current_pgn_path:
+                row["source_pgn"] = self.current_pgn_path
+
+            wtxt = weight_var.get().strip()
+            if wtxt:
+                try:
+                    row["weight"] = float(wtxt)
+                except Exception:
+                    messagebox.showerror("Mark bad move", f"Weight must be a number, got: {wtxt}")
+                    return
+
+            out_path = out_var.get().strip() or "feedback.jsonl"
+            out_dir = os.path.dirname(out_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(out_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+
+            self.feedback_out_path = out_path
+            self.lbl_status.config(
+                text=f"Saved feedback ply {self.ply_index}: bad={bad_move.uci()} good={good_move.uci()} -> {out_path}"
+            )
+            win.destroy()
+
+        btn_row = tk.Frame(win)
+        btn_row.grid(row=5, column=0, columnspan=2, sticky="e", padx=10, pady=(8, 10))
+        tk.Button(btn_row, text="Save", width=10, command=submit).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Cancel", width=10, command=win.destroy).pack(side="left", padx=4)
+
+        def on_double_click(_event):
+            submit()
+
+        good_move_list.bind("<Double-Button-1>", on_double_click)
+        if legal_display:
+            good_move_list.selection_set(0)
+
+        win.transient(self)
+        win.grab_set()
 
     # -----------------------------
-    # CAPTURED PIECES (recompute up to ply_index)
+    # CAPTURED PIECES
     # -----------------------------
-    def _create_capture_grid(self, parent: tk.Widget) -> list[tk.Label]:
-        box = tk.Frame(parent, relief="groove", bd=1, padx=4, pady=4)
-        box.pack(anchor="n", fill="x", pady=(6, 0))
-
-        for col in range(5):
-            box.grid_columnconfigure(col, weight=1)
-
-        slots: list[tk.Label] = []
-        for row in range(3):
-            box.grid_rowconfigure(row, weight=1)
-            for col in range(5):
-                lbl = tk.Label(box, text=" ", font=("Arial", 18), width=1, anchor="center")
-                lbl.grid(row=row, column=col, sticky="nsew")
-                slots.append(lbl)
-        return slots
-
     def on_side_resized(self, _event=None):
         self.update_capture_slot_layout()
 
@@ -329,59 +440,21 @@ class PGNViewer(tk.Tk):
         panel_w = min(self.left_frame.winfo_width(), self.right_frame.winfo_width())
         if panel_w <= 1:
             return
-
-        # Keep 5 columns of piece glyphs visible in narrow side panels.
         cell_w = max(14, int((panel_w - 16) / 5))
         font_size = max(10, min(24, int(cell_w * 0.72)))
         pad_x = max(0, int(cell_w * 0.08))
         pad_y = max(0, int(font_size * 0.06))
-
         for lbl in self.white_capture_slots + self.black_capture_slots:
             lbl.config(font=("Arial", font_size), padx=pad_x, pady=pad_y)
 
-    def recompute_captures(self):
-        """
-        Returns (white_taken, black_taken)
-        white_taken: unicode pieces captured BY White (black pieces taken)
-        black_taken: unicode pieces captured BY Black (white pieces taken)
-        """
-        if self.game is None:
-            return [], []
-
-        b = self.game.board()
-
-        white_taken = []  # black pieces captured by White
-        black_taken = []  # white pieces captured by Black
-
-        for i in range(self.ply_index):
-            mv = self.moves[i]
-            mover_is_white = b.turn == chess.WHITE  # before push
-
-            captured_symbol = None
-            if b.is_en_passant(mv):
-                captured_symbol = "p" if mover_is_white else "P"
-            elif b.is_capture(mv):
-                cap_piece = b.piece_at(mv.to_square)
-                if cap_piece is not None:
-                    captured_symbol = cap_piece.symbol()
-
-            b.push(mv)
-
-            if captured_symbol is not None:
-                if mover_is_white:
-                    white_taken.append(UNICODE_PIECE[captured_symbol])
-                else:
-                    black_taken.append(UNICODE_PIECE[captured_symbol])
-
-        return white_taken, black_taken
-
     def update_side_panels(self):
-        wcap, bcap = self.recompute_captures()
-
-        for i, lbl in enumerate(self.white_capture_slots):
-            lbl.config(text=wcap[i] if i < len(wcap) else " ")
-        for i, lbl in enumerate(self.black_capture_slots):
-            lbl.config(text=bcap[i] if i < len(bcap) else " ")
+        if self.game is None:
+            wcap, bcap = [], []
+        else:
+            initial = self.game.board()
+            wcap, bcap = recompute_captures(self.moves, self.ply_index, initial_board=initial)
+        update_capture_display(self.white_capture_slots, wcap)
+        update_capture_display(self.black_capture_slots, bcap)
 
     # -----------------------------
     # UI UPDATE
@@ -416,57 +489,8 @@ class PGNViewer(tk.Tk):
 
     def draw(self):
         self._resize_after_id = None
-        self.canvas.delete("all")
-
-        light = "#EEEED2"
-        dark = "#769656"
-        canvas_w = self.canvas.winfo_width()
-        canvas_h = self.canvas.winfo_height()
-        if canvas_w < 50 or canvas_h < 50:
-            canvas_w = self.board_px + 2 * self.margin
-            canvas_h = self.board_px + 2 * self.margin
-
-        board_px = max(160, min(canvas_w - 2 * self.margin, canvas_h - 2 * self.margin))
-        self.square = board_px / 8
-        self.board_origin_x = (canvas_w - board_px) / 2
-        self.board_origin_y = (canvas_h - board_px) / 2
-        piece_font = max(14, int(self.square * 0.58))
-        highlight_width = max(2, int(self.square * 0.05))
-
-        # squares
-        for r in range(8):
-            for c in range(8):
-                x0 = self.board_origin_x + c * self.square
-                y0 = self.board_origin_y + r * self.square
-                x1 = x0 + self.square
-                y1 = y0 + self.square
-                color = light if (r + c) % 2 == 0 else dark
-                self.canvas.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
-
-        # pieces
-        for sq, piece in self.board.piece_map().items():
-            r = 7 - chess.square_rank(sq)
-            c = chess.square_file(sq)
-            x = self.board_origin_x + c * self.square + self.square / 2
-            y = self.board_origin_y + r * self.square + self.square / 2
-            ch = UNICODE_PIECE[piece.symbol()]
-            self.canvas.create_text(x, y, text=ch, font=("Arial", piece_font))
-
-        # last move highlight
-        if self.game is not None and self.ply_index > 0:
-            mv = self.moves[self.ply_index - 1]
-            self.highlight_square(mv.from_square, highlight_width)
-            self.highlight_square(mv.to_square, highlight_width)
-
-    def highlight_square(self, sq: int, width: int = 3):
-        r = 7 - chess.square_rank(sq)
-        c = chess.square_file(sq)
-        x0 = self.board_origin_x + c * self.square
-        y0 = self.board_origin_y + r * self.square
-        x1 = x0 + self.square
-        y1 = y0 + self.square
-        inset = max(2, int(self.square * 0.04))
-        self.canvas.create_rectangle(x0 + inset, y0 + inset, x1 - inset, y1 - inset, outline="red", width=width)
+        last_move = self.moves[self.ply_index - 1] if (self.game is not None and self.ply_index > 0) else None
+        self.renderer.draw(self.board, last_move=last_move)
 
 
 if __name__ == "__main__":

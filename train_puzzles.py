@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+from encode import IN_CHANNELS
 from net import AlphaZeroNet
 from puzzle_train_data import (
     PuzzleDataset,
@@ -67,8 +68,8 @@ def _benchmark_cache_mode(
     """Quick throughput benchmark when training from shard cache."""
     if device == "cpu" and torch_threads > 0:
         torch.set_num_threads(int(torch_threads))
-    net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
-    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    net = AlphaZeroNet(in_channels=IN_CHANNELS, channels=128, num_blocks=10).to(device)
+    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
     net.train()
 
     bs = max(1, int(batch_size))
@@ -116,8 +117,8 @@ def _benchmark_csv_mode(
     """Quick throughput benchmark when training from CSV/DataLoader."""
     if device == "cpu" and torch_threads > 0:
         torch.set_num_threads(int(torch_threads))
-    net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
-    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    net = AlphaZeroNet(in_channels=IN_CHANNELS, channels=128, num_blocks=10).to(device)
+    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
     net.train()
     loader = DataLoader(
         PuzzleDataset(train_examples),
@@ -378,11 +379,18 @@ def main() -> None:
         if args.tune_only:
             return
 
-    net = AlphaZeroNet(in_channels=18, channels=64, num_blocks=5).to(device)
+    net = AlphaZeroNet(in_channels=IN_CHANNELS, channels=128, num_blocks=10).to(device)
     if args.resume_checkpoint and os.path.exists(args.resume_checkpoint):
-        net.load_state_dict(torch.load(args.resume_checkpoint, map_location=device))
-        print(f"Loaded {args.resume_checkpoint}")
-    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
+        payload = torch.load(args.resume_checkpoint, map_location=device, weights_only=False)
+        if isinstance(payload, dict) and "model_state_dict" in payload:
+            net.load_state_dict(payload["model_state_dict"])
+            it = payload.get("iter")
+            tag = f" (iter={it})" if it is not None else ""
+            print(f"Loaded {args.resume_checkpoint}{tag}")
+        else:
+            net.load_state_dict(payload)
+            print(f"Loaded {args.resume_checkpoint}")
+    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
 
     writer = SummaryWriter(log_dir="runs/chesszero_puzzles")
     best_val_top1 = -1.0
@@ -454,12 +462,20 @@ def main() -> None:
             ckpt_s += time.time() - t0
 
             t0 = time.time()
-            torch.save(net.state_dict(), "checkpoint_puzzle_latest.pt")
+            ckpt_payload = {
+                "model_state_dict": net.state_dict(),
+                "optimizer_state_dict": opt.state_dict(),
+                "epoch": epoch,
+                "in_channels": IN_CHANNELS,
+                "channels": 128,
+                "num_blocks": 10,
+            }
+            torch.save(ckpt_payload, "checkpoint_puzzle_latest.pt")
             ckpt_s += time.time() - t0
             if val_metrics["val_top1"] > best_val_top1:
                 best_val_top1 = val_metrics["val_top1"]
                 t0 = time.time()
-                torch.save(net.state_dict(), "checkpoint_puzzle_best.pt")
+                torch.save(ckpt_payload, "checkpoint_puzzle_best.pt")
                 ckpt_s += time.time() - t0
                 print(f"[Puzzle] new best val_top1={best_val_top1:.4f} -> checkpoint_puzzle_best.pt")
                 if use_cache:

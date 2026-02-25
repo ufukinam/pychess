@@ -173,6 +173,7 @@ def train_one_epoch(
 
         opt.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
 
         b = x.size(0)
@@ -210,12 +211,14 @@ def train_one_epoch_from_shards(
     total = 0
     loss_sum = 0.0
     invalid_target_rows = 0
-    total_shards = len(shard_paths)
+    shuffled_paths = list(shard_paths)
+    np.random.shuffle(shuffled_paths)
+    total_shards = len(shuffled_paths)
     epoch_t0 = time.time()
     bs = max(1, int(batch_size))
     total_load_s = 0.0
     total_train_s = 0.0
-    for shard_idx, path in enumerate(shard_paths, start=1):
+    for shard_idx, path in enumerate(shuffled_paths, start=1):
         load_t0 = time.time()
         states, target_idx, legal_masks = load_cached_shard(path)
         total_load_s += time.time() - load_t0
@@ -243,6 +246,7 @@ def train_one_epoch_from_shards(
             )
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             opt.step()
 
             b = x.size(0)

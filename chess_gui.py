@@ -16,8 +16,8 @@ class ChessControlPanel(tk.Tk):
         self.geometry("980x760")
         self.minsize(920, 680)
 
-        self.proc: subprocess.Popen | None = None
-        self.log_queue: "queue.Queue[str]" = queue.Queue()
+        self.procs: dict[str, subprocess.Popen] = {}
+        self.log_queue: "queue.Queue[tuple[str, object, object]]" = queue.Queue()
 
         self._build_ui()
         self.after(120, self._drain_logs)
@@ -41,7 +41,9 @@ class ChessControlPanel(tk.Tk):
             "Build Puzzle Cache",
             "Generate Puzzles",
             "Play vs Model",
+            "Model vs Model",
             "PGN Viewer",
+            "Feedback Candidates",
         ]:
             frame = self._create_scrollable_tab(self.notebook, name)
             self.tabs[name] = frame
@@ -51,21 +53,26 @@ class ChessControlPanel(tk.Tk):
         self._build_cache_tab()
         self._build_generate_tab()
         self._build_play_tab()
+        self._build_model_vs_model_tab()
         self._build_viewer_tab()
+        self._build_feedback_candidates_tab()
 
         run_bar = ttk.Frame(top)
         run_bar.grid(row=1, column=0, sticky="ew", pady=(10, 6))
         ttk.Button(run_bar, text="Run Selected Tab", command=self.run_selected_tab).pack(
             side="left"
         )
-        ttk.Button(run_bar, text="Stop Running", command=self.stop_process).pack(
+        ttk.Button(run_bar, text="Stop Selected Tab", command=self.stop_process).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(run_bar, text="Stop All", command=self.stop_all_processes).pack(
             side="left", padx=(8, 0)
         )
         ttk.Button(run_bar, text="Clear Logs", command=self.clear_logs).pack(
             side="left", padx=(8, 0)
         )
 
-        self.status_var = tk.StringVar(value="Idle")
+        self.status_var = tk.StringVar(value="Idle (0 running)")
         ttk.Label(run_bar, textvariable=self.status_var).pack(side="right")
 
         log_frame = ttk.LabelFrame(top, text="Live Output")
@@ -218,13 +225,13 @@ class ChessControlPanel(tk.Tk):
         self.sp_num_sims = self._add_entry(
             f,
             "Self-play sims",
-            "100",
+            "400",
             "MCTS simulations per self-play move.",
         )
         self.sp_eval_num_sims = self._add_entry(
             f,
             "Eval sims",
-            "25",
+            "50",
             "MCTS simulations used for evaluations and gating.",
         )
         self.sp_draw_penalty = self._add_entry(
@@ -308,14 +315,50 @@ class ChessControlPanel(tk.Tk):
         self.sp_gate_games = self._add_entry(
             f,
             "Gate games",
-            "8",
+            "30",
             "Candidate-vs-previous games per iteration (0 disables gating).",
         )
         self.sp_gate_min_score = self._add_entry(
             f,
             "Gate min score",
-            "0.55",
+            "0.52",
             "Minimum gate score to accept a newly trained model.",
+        )
+        self.sp_feedback_jsonl = self._add_entry(
+            f,
+            "Feedback JSONL (optional)",
+            "",
+            "Path to labeled feedback rows: fen, bad_move, good_move. Leave empty to disable feedback loss.",
+        )
+        self.sp_feedback_weight = self._add_entry(
+            f,
+            "Feedback weight",
+            "0.2",
+            "0 disables feedback; typical mix is 0.1-0.3 with replay loss.",
+        )
+        self.sp_feedback_batch = self._add_entry(
+            f,
+            "Feedback batch size",
+            "32",
+            "Feedback samples per train batch when feedback is enabled.",
+        )
+        self.sp_feedback_margin = self._add_entry(
+            f,
+            "Feedback margin",
+            "0.2",
+            "Required policy-logit margin between good and bad move.",
+        )
+        self.sp_feedback_max_samples = self._add_entry(
+            f,
+            "Feedback max samples",
+            "0",
+            "0 = load all rows; set cap for quick experiments.",
+        )
+        self.sp_augment = self._add_check(
+            f,
+            "Color-flip augmentation",
+            True,
+            "50% chance to color-flip each sampled position during training.",
         )
         preset_row = ttk.Frame(f)
         preset_row.pack(fill="x", padx=8, pady=(8, 6))
@@ -336,7 +379,7 @@ class ChessControlPanel(tk.Tk):
         self.sp_puzzle_ckpt.set("checkpoint_puzzle_best.pt")
         self.sp_lr.set("1e-4")
         self.sp_replay_dir.set("replay_fresh")
-        self.sp_num_sims.set("120")
+        self.sp_num_sims.set("400")
         self.sp_eval_num_sims.set("50")
         self.sp_draw_penalty.set("0.0")
         self.sp_stop_threefold.set(False)
@@ -351,8 +394,13 @@ class ChessControlPanel(tk.Tk):
         self.sp_early_sims.set("0")
         self.sp_early_plies.set("16")
         self.sp_late_sims.set("0")
-        self.sp_gate_games.set("12")
-        self.sp_gate_min_score.set("0.55")
+        self.sp_gate_games.set("30")
+        self.sp_gate_min_score.set("0.52")
+        self.sp_feedback_jsonl.set("")
+        self.sp_feedback_weight.set("0.2")
+        self.sp_feedback_batch.set("32")
+        self.sp_feedback_margin.set("0.2")
+        self.sp_feedback_max_samples.set("0")
         self._append_log("[Preset] Applied Safe self-play preset.\n")
 
     def _build_puzzle_train_tab(self) -> None:
@@ -647,6 +695,40 @@ class ChessControlPanel(tk.Tk):
             "ON stores gameplay as replay shards for potential later training.",
         )
 
+    def _build_model_vs_model_tab(self) -> None:
+        f = self.tabs["Model vs Model"]
+        ttk.Label(
+            f,
+            text="Run model-vs-model games in real time with selectable checkpoints, board review, and bad-move marking.",
+            foreground="#37474f",
+            wraplength=860,
+            justify="left",
+        ).pack(fill="x", padx=8, pady=(8, 6))
+        self.mm_device = self._add_entry(
+            f,
+            "Device",
+            "cpu",
+            "Use cpu (safe) or cuda (faster if GPU is configured).",
+        )
+        self.mm_sims = self._add_entry(
+            f,
+            "Num sims",
+            "50",
+            "MCTS simulations per model move.",
+        )
+        self.mm_delay = self._add_entry(
+            f,
+            "Move delay ms",
+            "400",
+            "Delay between model moves for real-time playback speed.",
+        )
+        self.mm_pgn_dir = self._add_entry(
+            f,
+            "PGN dir",
+            "model_games",
+            "Saved model-vs-model PGN destination.",
+        )
+
     def _build_viewer_tab(self) -> None:
         f = self.tabs["PGN Viewer"]
         ttk.Label(
@@ -665,7 +747,7 @@ class ChessControlPanel(tk.Tk):
         self.pv_games_dir = self._add_entry(
             f,
             "Games dir",
-            "games",
+            "model_games",
             "Folder used when Load latest is ON.",
         )
         self.pv_load_latest = self._add_check(
@@ -673,6 +755,64 @@ class ChessControlPanel(tk.Tk):
             "Load latest on start",
             True,
             "ON loads newest PGN in games dir when no specific path is provided.",
+        )
+
+    def _build_feedback_candidates_tab(self) -> None:
+        f = self.tabs["Feedback Candidates"]
+        ttk.Label(
+            f,
+            text="Generate candidate bad-move rows from many PGNs for faster manual labeling.",
+            foreground="#37474f",
+            wraplength=860,
+            justify="left",
+        ).pack(fill="x", padx=8, pady=(8, 6))
+        self.fc_pgn_glob = self._add_entry(
+            f,
+            "PGN glob",
+            "model_games/*.pgn",
+            "Glob pattern for source PGNs. Use recursive toggle for ** patterns.",
+        )
+        self.fc_recursive = self._add_check(
+            f,
+            "Recursive glob",
+            False,
+            "Enable recursive glob expansion for patterns like model_games/**/*.pgn.",
+        )
+        self.fc_out = self._add_entry(
+            f,
+            "Out JSONL",
+            "feedback_candidates.jsonl",
+            "Output file for candidate rows.",
+        )
+        self.fc_max_games = self._add_entry(
+            f,
+            "Max games",
+            "0",
+            "0 = all games matched by glob.",
+        )
+        self.fc_max_plies = self._add_entry(
+            f,
+            "Max plies/game",
+            "0",
+            "0 = include all plies per game.",
+        )
+        self.fc_min_ply = self._add_entry(
+            f,
+            "Min ply",
+            "1",
+            "Only include plies at or beyond this 1-based index.",
+        )
+        self.fc_side = self._add_entry(
+            f,
+            "Side (both|white|black)",
+            "both",
+            "Filter candidate rows by moving side.",
+        )
+        self.fc_max_legal = self._add_entry(
+            f,
+            "Max legal move hints",
+            "20",
+            "Number of legal UCI hints added per candidate row (0 disables).",
         )
 
     def run_selected_tab(self) -> None:
@@ -703,7 +843,13 @@ class ChessControlPanel(tk.Tk):
                 "--late_sims", self.sp_late_sims.get(),
                 "--gate_games", self.sp_gate_games.get(),
                 "--gate_min_score", self.sp_gate_min_score.get(),
+                "--feedback_weight", self.sp_feedback_weight.get(),
+                "--feedback_batch_size", self.sp_feedback_batch.get(),
+                "--feedback_margin", self.sp_feedback_margin.get(),
+                "--feedback_max_samples", self.sp_feedback_max_samples.get(),
             ]
+            if self.sp_feedback_jsonl.get().strip():
+                cmd += ["--feedback_jsonl", self.sp_feedback_jsonl.get().strip()]
             if self.sp_prefer_puzzle.get():
                 cmd.append("--prefer_puzzle_init")
             if self.sp_stop_threefold.get():
@@ -712,6 +858,8 @@ class ChessControlPanel(tk.Tk):
                 cmd.append("--stop_on_repeat2")
             if self.sp_use_mat_shape.get():
                 cmd.append("--use_material_shaping")
+            if self.sp_augment.get():
+                cmd.append("--augment")
         elif tab_name == "Puzzle Train":
             cmd = [
                 *base, "train-puzzles",
@@ -780,6 +928,31 @@ class ChessControlPanel(tk.Tk):
                 cmd.append("--play_as_black")
             if self.pm_save_samples.get():
                 cmd.append("--save_training_samples")
+        elif tab_name == "Model vs Model":
+            cmd = [
+                *base, "model-vs-model",
+                "--device", self.mm_device.get(),
+                "--num_sims", self.mm_sims.get(),
+                "--move_delay_ms", self.mm_delay.get(),
+                "--pgn_dir", self.mm_pgn_dir.get(),
+            ]
+        elif tab_name == "Feedback Candidates":
+            side = self.fc_side.get().strip().lower()
+            if side not in ("both", "white", "black"):
+                self._append_log("Feedback Candidates: side must be one of both|white|black.\n")
+                return
+            cmd = [
+                *base, "generate-feedback-candidates",
+                "--pgn_glob", self.fc_pgn_glob.get(),
+                "--out", self.fc_out.get(),
+                "--max_games", self.fc_max_games.get(),
+                "--max_plies_per_game", self.fc_max_plies.get(),
+                "--min_ply", self.fc_min_ply.get(),
+                "--side", side,
+                "--max_legal_moves", self.fc_max_legal.get(),
+            ]
+            if self.fc_recursive.get():
+                cmd.append("--recursive")
         else:  # PGN Viewer
             cmd = [
                 *base, "pgn-viewer",
@@ -790,14 +963,21 @@ class ChessControlPanel(tk.Tk):
             if self.pv_load_latest.get():
                 cmd.append("--load_latest")
 
-        self.start_process(cmd)
+        self.start_process(tab_name, cmd)
 
-    def start_process(self, cmd: list[str]) -> None:
-        if self.proc and self.proc.poll() is None:
-            self._append_log("A process is already running. Stop it first.\n")
+    def _update_status(self) -> None:
+        n = len(self.procs)
+        if n == 0:
+            self.status_var.set("Idle (0 running)")
             return
-        self._append_log("\n[Run] " + " ".join(cmd) + "\n")
-        self.status_var.set("Running...")
+        self.status_var.set(f"Running ({n} process{'es' if n != 1 else ''})")
+
+    def start_process(self, tab_name: str, cmd: list[str]) -> None:
+        existing = self.procs.get(tab_name)
+        if existing is not None and existing.poll() is None:
+            self._append_log(f"[{tab_name}] A process is already running for this tab. Stop it first.\n")
+            return
+        self._append_log(f"\n[{tab_name}] [Run] " + " ".join(cmd) + "\n")
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -806,7 +986,7 @@ class ChessControlPanel(tk.Tk):
         if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
             creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
 
-        self.proc = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -815,32 +995,48 @@ class ChessControlPanel(tk.Tk):
             env=env,
             creationflags=creationflags,
         )
-        t = threading.Thread(target=self._reader_thread, daemon=True)
+        self.procs[tab_name] = proc
+        self._update_status()
+
+        t = threading.Thread(target=self._reader_thread, args=(tab_name, proc), daemon=True)
         t.start()
 
-    def _reader_thread(self) -> None:
-        assert self.proc is not None and self.proc.stdout is not None
-        for line in self.proc.stdout:
-            self.log_queue.put(line)
-        code = self.proc.wait()
-        self.log_queue.put(f"\n[Process exited with code {code}]\n")
-        self.log_queue.put("__PROCESS_DONE__")
+    def _reader_thread(self, tab_name: str, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self.log_queue.put(("out", tab_name, line))
+        code = proc.wait()
+        self.log_queue.put(("done", tab_name, int(code)))
 
     def _drain_logs(self) -> None:
         while True:
             try:
-                line = self.log_queue.get_nowait()
+                kind, payload, extra = self.log_queue.get_nowait()
             except queue.Empty:
                 break
-            if line == "__PROCESS_DONE__":
-                self.status_var.set("Idle")
+            if kind == "out":
+                tab_name = str(payload)
+                line = str(extra)
+                if line.endswith("\n"):
+                    self._append_log(f"[{tab_name}] {line}")
+                else:
+                    self._append_log(f"[{tab_name}] {line}\n")
                 continue
-            self._append_log(line)
+            if kind == "done":
+                tab_name = str(payload)
+                code = int(extra)
+                proc = self.procs.get(tab_name)
+                if proc is not None and proc.poll() is not None:
+                    self.procs.pop(tab_name, None)
+                self._append_log(f"\n[{tab_name}] [Process exited with code {code}]\n")
+                self._update_status()
         self.after(120, self._drain_logs)
 
     def stop_process(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            pid = self.proc.pid
+        tab_name = self.notebook.tab(self.notebook.select(), "text")
+        proc = self.procs.get(tab_name)
+        if proc and proc.poll() is None:
+            pid = proc.pid
             if os.name == "nt":
                 subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
@@ -849,10 +1045,29 @@ class ChessControlPanel(tk.Tk):
                     check=False,
                 )
             else:
-                self.proc.terminate()
-            self._append_log(f"[Process termination requested for PID {pid}]\n")
+                proc.terminate()
+            self._append_log(f"[{tab_name}] [Process termination requested for PID {pid}]\n")
         else:
+            self._append_log(f"[{tab_name}] [No running process]\n")
+
+    def stop_all_processes(self) -> None:
+        if not self.procs:
             self._append_log("[No running process]\n")
+            return
+        for tab_name, proc in list(self.procs.items()):
+            if proc.poll() is not None:
+                continue
+            pid = proc.pid
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                proc.terminate()
+            self._append_log(f"[{tab_name}] [Process termination requested for PID {pid}]\n")
 
     def clear_logs(self) -> None:
         self.log.delete("1.0", "end")
