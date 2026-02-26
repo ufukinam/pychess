@@ -12,6 +12,9 @@ from env import ChessEnv
 from encode import action_to_move, move_to_index, IN_CHANNELS
 from mcts import Node, mcts_policy_and_action, reuse_root_after_action
 
+EVAL_DIRICHLET_ALPHA = 0.0
+EVAL_DIRICHLET_EPS = 0.0
+
 
 def play_vs_random(
     net,
@@ -34,6 +37,8 @@ def play_vs_random(
             pi, action = mcts_policy_and_action(
                 net, root=root, num_sims=num_sims, temperature=1e-6,
                 device=device, history=board_history,
+                dirichlet_alpha=EVAL_DIRICHLET_ALPHA,
+                dirichlet_eps=EVAL_DIRICHLET_EPS,
             )
             mv = action_to_move(action)
             if mv not in board.legal_moves:
@@ -81,6 +86,8 @@ def play_net_vs_net(
         _, action = mcts_policy_and_action(
             side_net, root=root, num_sims=num_sims, temperature=1e-6,
             device=device, history=board_history,
+            dirichlet_alpha=EVAL_DIRICHLET_ALPHA,
+            dirichlet_eps=EVAL_DIRICHLET_EPS,
         )
         mv = action_to_move(action)
         if mv not in board.legal_moves:

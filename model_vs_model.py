@@ -20,6 +20,8 @@ from chess_board_base import (
 )
 
 DEFAULT_PGN_DIR = "model_games"
+INFER_DIRICHLET_ALPHA = 0.0
+INFER_DIRICHLET_EPS = 0.0
 
 
 def save_pgn_from_moves(moves, result_str, out_dir, white_name, black_name):
@@ -238,6 +240,8 @@ class ModelVsModelApp(tk.Tk):
             _pi, action = mcts_policy_and_action(
                 net, root=root, num_sims=self.num_sims, temperature=1e-6,
                 device=self.device, history=self.board_history,
+                dirichlet_alpha=INFER_DIRICHLET_ALPHA,
+                dirichlet_eps=INFER_DIRICHLET_EPS,
             )
         move = action_to_move(action)
         if move not in self.board.legal_moves:

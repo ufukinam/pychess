@@ -50,8 +50,8 @@ def test_board_tensor_shape():
 def test_board_tensor_history():
     board = chess.Board()
     history = []
-    moves = list(board.legal_moves)[:4]
-    for mv in moves:
+    for _ in range(4):
+        mv = next(iter(board.legal_moves))
         history.append(board.copy(stack=False))
         board.push(mv)
     t = board_to_tensor(board, history=history)
