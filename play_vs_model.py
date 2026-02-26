@@ -23,6 +23,8 @@ from chess_board_base import (
 SAVE_TRAINING_SAMPLES = True
 HUMAN_REPLAY_DIR = "replay_human"
 HUMAN_PGN_DIR = "human_games"
+INFER_DIRICHLET_ALPHA = 0.0
+INFER_DIRICHLET_EPS = 0.0
 
 
 def save_pgn_from_moves(moves, result_str, out_dir, human_is_white):
@@ -274,6 +276,8 @@ class PlayVsModel(tk.Tk):
             pi, action = mcts_policy_and_action(
                 self.net, root=self.root, num_sims=self.num_sims,
                 temperature=1e-6, device=self.device, history=self.board_history,
+                dirichlet_alpha=INFER_DIRICHLET_ALPHA,
+                dirichlet_eps=INFER_DIRICHLET_EPS,
             )
         state = board_to_tensor(self.board, history=self.board_history)
         self.traj.append((state, pi.astype(np.float32), self.board.turn))

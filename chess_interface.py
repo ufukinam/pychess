@@ -46,6 +46,8 @@ def cmd_train_selfplay(args: argparse.Namespace) -> int:
     cmd += ["--feedback_max_samples", str(args.feedback_max_samples)]
     if args.feedback_jsonl:
         cmd += ["--feedback_jsonl", args.feedback_jsonl]
+    if args.load_optimizer_from_puzzle_init:
+        cmd.append("--load_optimizer_from_puzzle_init")
     if args.prefer_puzzle_init:
         cmd.append("--prefer_puzzle_init")
     if args.stop_on_threefold:
@@ -191,6 +193,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--prefer_puzzle_init",
         action="store_true",
         help="Prefer puzzle checkpoint over init checkpoint when available.",
+    )
+    sp.add_argument(
+        "--load_optimizer_from_puzzle_init",
+        action="store_true",
+        help=(
+            "When --prefer_puzzle_init is used, also restore optimizer state from puzzle checkpoint. "
+            "Default behavior transfers only model weights."
+        ),
     )
     sp.add_argument("--iters", type=int, default=5, help="Training iterations.")
     sp.add_argument("--games_per_iter", type=int, default=40, help="Self-play games per iteration.")

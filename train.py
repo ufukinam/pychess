@@ -48,6 +48,14 @@ def main():
     ap.add_argument("--init_checkpoint", type=str, default="checkpoint_latest.pt")
     ap.add_argument("--puzzle_checkpoint", type=str, default="checkpoint_puzzle_latest.pt")
     ap.add_argument("--prefer_puzzle_init", action="store_true")
+    ap.add_argument(
+        "--load_optimizer_from_puzzle_init",
+        action="store_true",
+        help=(
+            "When using --prefer_puzzle_init, also restore optimizer state from the puzzle checkpoint. "
+            "By default only model weights are transferred."
+        ),
+    )
     ap.add_argument("--iters", type=int, default=5)
     ap.add_argument("--games_per_iter", type=int, default=40)
     ap.add_argument("--batch_size", type=int, default=64)
@@ -115,23 +123,34 @@ def main():
     # ---- checkpoint loading ----
     loaded_ckpt = None
     loaded_ckpt_iter = None
+    loaded_ckpt_opt = False
 
-    def _load_checkpoint(path: str) -> int | None:
+    def _load_checkpoint(path: str, load_optimizer: bool = True) -> tuple[int | None, bool]:
         payload = torch.load(path, map_location=device, weights_only=False)
         if isinstance(payload, dict) and "model_state_dict" in payload:
             net.load_state_dict(payload["model_state_dict"])
-            if "optimizer_state_dict" in payload:
+            optimizer_loaded = False
+            if load_optimizer and "optimizer_state_dict" in payload:
                 opt.load_state_dict(payload["optimizer_state_dict"])
-            return int(payload["iter"]) if "iter" in payload else None
+                optimizer_loaded = True
+            step = payload.get("iter", payload.get("epoch"))
+            step_i = int(step) if step is not None else None
+            return step_i, optimizer_loaded
         else:
             net.load_state_dict(payload)
-            return None
+            return None, False
 
     if args.prefer_puzzle_init and args.puzzle_checkpoint and os.path.exists(args.puzzle_checkpoint):
-        loaded_ckpt_iter = _load_checkpoint(args.puzzle_checkpoint)
+        loaded_ckpt_iter, loaded_ckpt_opt = _load_checkpoint(
+            args.puzzle_checkpoint,
+            load_optimizer=bool(args.load_optimizer_from_puzzle_init),
+        )
         loaded_ckpt = args.puzzle_checkpoint
     elif args.init_checkpoint and os.path.exists(args.init_checkpoint):
-        loaded_ckpt_iter = _load_checkpoint(args.init_checkpoint)
+        loaded_ckpt_iter, loaded_ckpt_opt = _load_checkpoint(
+            args.init_checkpoint,
+            load_optimizer=True,
+        )
         loaded_ckpt = args.init_checkpoint
 
     init_eval_score: float | None = None
@@ -146,7 +165,8 @@ def main():
 
     if loaded_ckpt:
         tag = f" (iter={loaded_ckpt_iter})" if loaded_ckpt_iter is not None else ""
-        print(f"Loaded {loaded_ckpt}{tag}")
+        opt_tag = "optimizer=loaded" if loaded_ckpt_opt else "optimizer=not_loaded"
+        print(f"Loaded {loaded_ckpt}{tag} [{opt_tag}]")
         with torch.inference_mode():
             eval_stats = eval_net_vs_random(net, games=12, num_sims=int(args.eval_num_sims), device=device)
         init_eval_score = float(eval_stats["score"])
