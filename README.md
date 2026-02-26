@@ -1,250 +1,192 @@
 # PyChess Training Toolkit
 
 Unified toolkit for:
-- self-play training
+- self-play RL training
 - puzzle pretraining
-- large puzzle cache building
+- puzzle cache building from large CSVs
 - synthetic puzzle generation
-- PGN viewing
-- human vs model play
-- visual control panel (no terminal required)
+- human-vs-model and model-vs-model GUI play
+- PGN viewing and feedback labeling
+- CLI + GUI orchestration
 
-All major workflows can be controlled from one interface:
-`chess_interface.py`
+## Environment
 
-If you prefer a visual UI, use:
-`chess_gui.py`
+Use the project venv for all commands:
 
-## Learning Path (Comprehensive)
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
 
-If you want to learn this project from zero (Why -> How -> Code), use:
+## Main Entrypoints
 
-- `docs/TEACHING_PLAN.md` (full curriculum, module by module)
-- `docs/WORKBOOK.md` (hands-on checklist and acceptance gates)
-- `docs/BEGINNER_ML_GUIDE.md` (plain-English explanation of ML/DL concepts and library usage in this codebase)
+- Unified CLI: `chess_interface.py`
+- Visual control panel: `chess_gui.py`
+
+## Documentation (Current On-Disk Set)
+
+- `docs/BEGINNER_ZERO_TO_ML.md`: zero-prerequisite onboarding guide
+- `docs/SYSTEM_CONTEXT.md`: architecture and dataflow memory file
+- `docs/CODEBASE_AUDIT.md`: integrity findings + patch-ready risk specs
+- `docs/FILE_CATALOG_TRACKED.md`: tracked-file catalog with roles and dependencies
 
 ## Quick Start
 
-Run the unified interface help:
-
-```bash
-python chess_interface.py -h
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py -h
+.\.venv\Scripts\python.exe chess_gui.py
 ```
 
-Run the visual control panel:
+Subcommand help:
 
-```bash
-python chess_gui.py
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py train-selfplay -h
+.\.venv\Scripts\python.exe chess_interface.py train-puzzles -h
+.\.venv\Scripts\python.exe chess_interface.py build-puzzle-cache -h
+.\.venv\Scripts\python.exe chess_interface.py generate-puzzles -h
+.\.venv\Scripts\python.exe chess_interface.py play-vs-model -h
+.\.venv\Scripts\python.exe chess_interface.py pgn-viewer -h
+.\.venv\Scripts\python.exe chess_interface.py model-vs-model -h
+.\.venv\Scripts\python.exe chess_interface.py generate-feedback-candidates -h
 ```
 
-List subcommand help:
+## Core Workflows
 
-```bash
-python chess_interface.py train-puzzles -h
-python chess_interface.py train-selfplay -h
-python chess_interface.py build-puzzle-cache -h
-python chess_interface.py play-vs-model -h
-python chess_interface.py pgn-viewer -h
+### 1) Build Puzzle Cache (recommended for large datasets)
+
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py build-puzzle-cache `
+  --puzzles_csv "lichess_db_puzzle.csv" `
+  --out_dir "puzzle_cache_lichess" `
+  --shard_size 2048 `
+  --val_ratio 0.1 `
+  --seed 42 `
+  --workers 0 `
+  --compression compressed `
+  --clean_out_dir
 ```
 
-## Main Workflows
+Cache schema:
+- train shards: `states`, `target_idx`, `legal_masks_packed`
+- val shards: train keys + `fens`, `moves`, `puzzle_ids`
 
-### 1) Build Puzzle Cache (for big CSV like Lichess)
+### 2) Puzzle Pretraining
 
-```bash
-python chess_interface.py build-puzzle-cache \
-  --puzzles_csv "lichess_db_puzzle.csv" \
-  --out_dir "puzzle_cache_lichess" \
-  --shard_size 2048 \
-  --val_ratio 0.1 \
-  --seed 42
-```
+From cache:
 
-Optional shard caps:
-
-```bash
-python chess_interface.py build-puzzle-cache \
-  --puzzles_csv "lichess_db_puzzle.csv" \
-  --out_dir "puzzle_cache_small" \
-  --shard_size 2048 \
-  --max_train_shards 200 \
-  --max_val_shards 20
-```
-
-### 2) Train on Puzzles
-
-From cache (recommended):
-
-```bash
-python chess_interface.py train-puzzles \
-  --cache_dir "puzzle_cache_lichess" \
-  --epochs 20 \
-  --batch_size 128 \
-  --lr 3e-4 \
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py train-puzzles `
+  --cache_dir "puzzle_cache_lichess" `
+  --epochs 10 `
+  --batch_size 128 `
+  --lr 3e-4 `
   --progress_every_batches 100
 ```
 
-From CSV directly:
+From CSV:
 
-```bash
-python chess_interface.py train-puzzles \
-  --puzzles_csv "puzzles_synthetic.csv" \
-  --epochs 10 \
-  --batch_size 128
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py train-puzzles `
+  --puzzles_csv "puzzles_synthetic.csv" `
+  --epochs 5 `
+  --batch_size 128 `
+  --lr 3e-4
 ```
 
-Outputs:
+Primary outputs:
 - `checkpoint_puzzle_latest.pt`
 - `checkpoint_puzzle_best.pt`
-- best validation PGNs in `puzzle_games/` (configurable)
+- optional PGN exports in `puzzle_games/`
 
-### 3) Start Self-Play from Puzzle Model
+### 3) Self-Play RL Training
 
-```bash
-python chess_interface.py train-selfplay \
-  --prefer_puzzle_init \
+Weights-only puzzle transfer (default):
+
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py train-selfplay `
+  --prefer_puzzle_init `
   --puzzle_checkpoint "checkpoint_puzzle_best.pt"
 ```
 
-### 4) Play and Inspect Games
+If you explicitly want optimizer restore from puzzle checkpoint:
 
-Play vs model:
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py train-selfplay `
+  --prefer_puzzle_init `
+  --puzzle_checkpoint "checkpoint_puzzle_best.pt" `
+  --load_optimizer_from_puzzle_init
+```
 
-```bash
-python chess_interface.py play-vs-model \
-  --checkpoint "checkpoint_latest.pt" \
-  --num_sims 80 \
+### 4) Play, Compare, and Inspect Games
+
+Human vs model:
+
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py play-vs-model `
+  --checkpoint "checkpoint_latest.pt" `
+  --num_sims 80 `
   --save_training_samples
 ```
 
-Open viewer:
+Model vs model GUI:
 
-```bash
-python chess_interface.py pgn-viewer --load_latest
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py model-vs-model `
+  --num_sims 50 `
+  --move_delay_ms 400 `
+  --pgn_dir "model_games"
 ```
 
-or:
+PGN viewer:
 
-```bash
-python chess_interface.py pgn-viewer --pgn_path "games/game_xxx.pgn"
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py pgn-viewer --load_latest --games_dir "games"
 ```
 
-## Visual Interface (No Terminal Needed)
+### 5) Feedback Candidate Generation
+
+```powershell
+.\.venv\Scripts\python.exe chess_interface.py generate-feedback-candidates `
+  --pgn_glob "model_games/*.pgn" `
+  --out "feedback_candidates.jsonl" `
+  --side both `
+  --max_legal_moves 20
+```
+
+## Visual Control Panel
 
 Launch:
 
-```bash
-python chess_gui.py
+```powershell
+.\.venv\Scripts\python.exe chess_gui.py
 ```
 
-Tabs available:
+Tabs:
 - Self-Play Train
 - Puzzle Train
 - Build Puzzle Cache
 - Generate Puzzles
 - Play vs Model
+- Model vs Model
 - PGN Viewer
+- Feedback Candidates
 
-Features:
-- form-based parameter editing
-- one-click run for selected workflow
-- live output console inside UI
-- stop running process button
+## Script Entrypoints (Direct)
 
-## Unified Interface: Subcommands
-
-## `train-selfplay`
-Runs `train.py`.
-
-Parameters:
-- `--init_checkpoint`: primary checkpoint path.
-- `--puzzle_checkpoint`: puzzle checkpoint path.
-- `--prefer_puzzle_init`: prefer puzzle checkpoint when available.
-
-## `train-puzzles`
-Runs `train_puzzles.py`.
-
-Parameters:
-- `--cache_dir`: NPZ cache directory (`train_shard_*.npz`, `val_shard_*.npz`).
-- `--puzzles_csv`: direct CSV path (if cache not used).
-- `--limit`: max examples (0 = unlimited).
-- `--batch_size`: training batch size.
-- `--epochs`: number of epochs.
-- `--lr`: learning rate.
-- `--val_ratio`: validation split ratio (CSV mode).
-- `--seed`: random seed.
-- `--label_smoothing`: CE label smoothing.
-- `--overfit_debug_n`: overfit debug sample count.
-- `--pgn_dir`: output folder for best validation puzzle PGNs.
-- `--pgn_max_games`: max exported PGNs per best epoch.
-- `--progress_every_batches`: log interval for training batches.
-- `--resume_checkpoint`: puzzle checkpoint to resume from.
-
-Metrics:
-- `train_loss`, `val_loss`
-- `val_top1`, `val_top5`
-- `raw_legality_rate`, `masked_legality_rate`
-
-## `build-puzzle-cache`
-Runs `build_puzzle_cache.py`.
-
-Parameters:
-- `--puzzles_csv`: source puzzle CSV.
-- `--out_dir`: cache output folder.
-- `--limit`: optional max read rows.
-- `--val_ratio`: validation ratio.
-- `--seed`: split seed.
-- `--shard_size`: samples per shard.
-- `--max_train_shards`: cap train shard count (0 no cap).
-- `--max_val_shards`: cap val shard count (0 no cap).
-
-Cache format:
-- train shard keys: `states`, `target_idx`, `legal_masks_packed`
-- val shard keys: above + `fens`, `moves`, `puzzle_ids`
-
-## `generate-puzzles`
-Runs `generate_puzzles.py`.
-
-Parameters:
-- `--out`: output CSV path.
-- `--count`: number of synthetic puzzles.
-- `--seed`: random seed.
-
-## `play-vs-model`
-Runs `play_vs_model.py`.
-
-Parameters:
-- `--device`: `cpu` or `cuda`.
-- `--checkpoint`: model checkpoint path.
-- `--num_sims`: MCTS simulations per model move.
-- `--play_as_black`: start as black.
-- `--save_training_samples`: save human replay shards.
-- `--human_replay_dir`: replay output dir.
-- `--human_pgn_dir`: PGN output dir.
-
-## `pgn-viewer`
-Runs `pgn_viewer.py`.
-
-Parameters:
-- `--pgn_path`: PGN file to open immediately.
-- `--load_latest`: load latest PGN from games directory.
-- `--games_dir`: directory used by `--load_latest`.
-
-## Existing Script Entry Points
-
-You can still run scripts directly:
 - `train.py`
 - `train_puzzles.py`
 - `build_puzzle_cache.py`
 - `generate_puzzles.py`
 - `play_vs_model.py`
+- `model_vs_model.py`
 - `pgn_viewer.py`
+- `generate_feedback_candidates.py`
 
-The unified interface is a convenience layer over these.
+## Notes
 
-## Reliability Tips
+- Use cache mode for large puzzle datasets.
+- Evaluation/inference paths run with Dirichlet root noise disabled for consistency.
+- Run tests with:
 
-- Use puzzle cache for large datasets (fast/reproducible).
-- Prefer `checkpoint_puzzle_best.pt` for transfer.
-- Monitor `val_top1` + `eval_random/score`, not draw rate alone.
-- If cache shards are partially corrupted, trainer skips invalid shards and continues.
+```powershell
+.\.venv\Scripts\python.exe tests.py
+```
