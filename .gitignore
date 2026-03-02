@@ -44,6 +44,9 @@ human_games/
 puzzle_games/
 model_games/
 
+# ---- Other unnecessary folders ----
+output/
+
 # ---- Large puzzle datasets / generated CSVs ----
 lichess_db_puzzle.csv
 puzzles_synthetic.csv

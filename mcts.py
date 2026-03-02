@@ -127,7 +127,7 @@ def expand_node(node: Node, net, device: str, add_dirichlet: bool,
         node.N[a] = 0
         node.W[a] = 0.0
 
-    if add_dirichlet and len(legal) > 0:
+    if add_dirichlet and len(legal) > 0 and float(dirichlet_eps) > 0.0 and float(dirichlet_alpha) > 0.0:
         noise = np.random.dirichlet([dirichlet_alpha] * len(legal))
         for i, a in enumerate(legal):
             a = int(a)
