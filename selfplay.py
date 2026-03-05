@@ -99,6 +99,7 @@ def play_self_game(
     early_sims: int | None = None,
     early_plies: int = 16,
     late_sims: int | None = None,
+    claim_draw_terminal: bool = True,
 ):
     EARLY_SIMS = int(early_sims) if early_sims is not None else int(num_sims)
     EARLY_PLIES = max(0, int(early_plies))
@@ -125,7 +126,7 @@ def play_self_game(
     pos_counts: dict[str, int] = {}
     pos_counts[_pos_key(board)] = 1
 
-    while (not env.is_terminal()) and ply < max_plies:
+    while (not board.is_game_over(claim_draw=bool(claim_draw_terminal))) and ply < max_plies:
         t = temperature if ply < temp_moves else temp_floor
         sims = EARLY_SIMS if ply < EARLY_PLIES else LATE_SIMS
 
@@ -182,7 +183,7 @@ def play_self_game(
         root = reuse_root_after_action(root, action)
         root.board = board.copy(stack=False)
 
-        if board.is_game_over(claim_draw=True):
+        if board.is_game_over(claim_draw=bool(claim_draw_terminal)):
             root.terminal = True
             break
 
@@ -195,9 +196,14 @@ def play_self_game(
 
     # ---- outcome ----
     true_result_str = None
-    if env.is_terminal():
-        true_result_str = board.result(claim_draw=True)
-        z = float(env.result_value())
+    if board.is_game_over(claim_draw=bool(claim_draw_terminal)):
+        true_result_str = board.result(claim_draw=bool(claim_draw_terminal))
+        if true_result_str == "1-0":
+            z = 1.0
+        elif true_result_str == "0-1":
+            z = -1.0
+        else:
+            z = 0.0
         if z == 0.0:
             z = float(draw_penalty)
     else:
@@ -215,10 +221,10 @@ def play_self_game(
             -1.0, 1.0,
         ))
 
-    if env.is_terminal() and board.can_claim_threefold_repetition():
+    if board.is_game_over(claim_draw=True) and board.can_claim_threefold_repetition():
         threefold_claimed = 1
 
-    result_str = true_result_str if (env.is_terminal() and true_result_str) else "1/2-1/2"
+    result_str = true_result_str if (true_result_str is not None) else "1/2-1/2"
 
     samples = []
     for state, pi, to_play in traj:

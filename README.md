@@ -22,6 +22,7 @@ If you want to learn this project from zero (Why -> How -> Code), use:
 - `docs/TEACHING_PLAN.md` (full curriculum, module by module)
 - `docs/WORKBOOK.md` (hands-on checklist and acceptance gates)
 - `docs/BEGINNER_ML_GUIDE.md` (plain-English explanation of ML/DL concepts and library usage in this codebase)
+- `docs/TRAINING_ROADMAP.md` (practical path to improve strength with `checkpoint_latest.pt` + `checkpoint_best.pt`)
 
 ## Quick Start
 

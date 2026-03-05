@@ -16,6 +16,34 @@ EVAL_DIRICHLET_ALPHA = 0.0
 EVAL_DIRICHLET_EPS = 0.0
 
 
+def _apply_random_opening(
+    env: ChessEnv,
+    board_history: list[chess.Board],
+    max_random_plies: int,
+) -> int:
+    """Play a random legal opening prefix and return applied plies."""
+    max_p = max(0, int(max_random_plies))
+    if max_p <= 0:
+        return 0
+    target = int(np.random.randint(0, max_p + 1))
+    applied = 0
+    board = env.board
+    for _ in range(target):
+        if env.is_terminal():
+            break
+        legal = list(board.legal_moves)
+        if not legal:
+            break
+        mv = legal[int(np.random.randint(0, len(legal)))]
+        board_history.append(board.copy(stack=False))
+        env.push(mv)
+        board = env.board
+        applied += 1
+        if board.is_game_over(claim_draw=True):
+            break
+    return applied
+
+
 def play_vs_random(
     net,
     net_plays_white: bool,
@@ -71,12 +99,14 @@ def play_net_vs_net(
     num_sims: int = 50,
     max_plies: int = 200,
     device: str = "cpu",
+    random_opening_plies: int = 0,
 ) -> float:
     """Returns +1 net_a win, 0 draw, -1 net_a loss."""
     env = ChessEnv()
     board = env.reset()
-    ply = 0
     board_history: list[chess.Board] = []
+    ply = _apply_random_opening(env, board_history, int(random_opening_plies))
+    board = env.board
 
     while (not env.is_terminal()) and ply < max_plies:
         a_to_move = (board.turn == chess.WHITE) == a_plays_white
@@ -107,13 +137,15 @@ def play_net_vs_net(
 
 def eval_candidate_vs_baseline(candidate_net, baseline_net,
                                games: int = 30, num_sims: int = 50,
-                               device: str = "cpu") -> dict:
+                               device: str = "cpu",
+                               random_opening_plies: int = 0) -> dict:
     wins = draws = losses = 0
     results = []
     for i in range(games):
         r = play_net_vs_net(candidate_net, baseline_net,
                             a_plays_white=(i % 2 == 0),
-                            num_sims=num_sims, device=device)
+                            num_sims=num_sims, device=device,
+                            random_opening_plies=int(random_opening_plies))
         results.append(r)
         if r > 0: wins += 1
         elif r < 0: losses += 1

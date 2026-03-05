@@ -39,8 +39,8 @@ It also includes GUI/CLI tooling for:
 3. Store `(state, pi, v)` samples in replay buffer (`selfplay_train_core.ReplayBuffer`).
 4. Run minibatch updates (`train_step` or `train_step_with_feedback`).
 5. Gate candidate net against previous snapshot (`eval.eval_candidate_vs_baseline`).
-6. Save accepted checkpoint (`checkpoint_latest.pt`).
-7. Periodically evaluate vs random baseline (`eval.eval_net_vs_random`).
+6. Save latest accepted checkpoint (`checkpoint_latest.pt`).
+7. Periodically evaluate vs random baseline (`eval.eval_net_vs_random`) and update best-scoring checkpoint (`checkpoint_best.pt`).
 
 ### 2.3 Feedback path
 
@@ -111,7 +111,8 @@ Interfaces:
   - `checkpoint_puzzle_latest.pt`
   - `checkpoint_puzzle_best.pt`
 - Self-play training:
-  - `checkpoint_latest.pt` (and periodic `checkpoint_XXX.pt`)
+  - `checkpoint_latest.pt` (latest accepted; plus periodic `checkpoint_XXX.pt`)
+  - `checkpoint_best.pt` (best by configured random-eval score mode)
 - Typical payload keys:
   - `model_state_dict`
   - `optimizer_state_dict`
@@ -137,6 +138,16 @@ Interfaces:
   - Balances recency vs diversity.
 - `gate_games`, `gate_min_score`
   - Controls acceptance strictness and variance.
+- `gate_score_mode`
+  - `score` for classic behavior, `ci_low` for stricter confidence-aware gating.
+- `eval_every`, `eval_games`
+  - Controls random-baseline eval cadence and variance.
+- `best_score_mode`
+  - `score` or `ci_low` for `checkpoint_best.pt` promotion logic.
+- `best_promotion_rule`
+  - `and_gate_eval` requires both gate and random-eval improvements for best promotion.
+- `scoreboard_jsonl`
+  - Produces line-delimited metric history for post-run analysis.
 
 ### 5.3 Puzzle-training controls
 

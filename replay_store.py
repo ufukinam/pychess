@@ -4,10 +4,16 @@ from __future__ import annotations
 import os
 import glob
 import time
+import zipfile
 import numpy as np
 
 
-def save_shard(samples, out_dir: str = "replay", prefix: str = "shard") -> str:
+def save_shard(
+    samples,
+    out_dir: str = "replay",
+    prefix: str = "shard",
+    compression: str = "compressed",
+) -> str:
     """
     samples: list of (state(IN_CHANNELS,8,8), pi(ACTION_SIZE,), v)
     Saves a compressed .npz shard to disk.
@@ -20,7 +26,10 @@ def save_shard(samples, out_dir: str = "replay", prefix: str = "shard") -> str:
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     path = os.path.join(out_dir, f"{prefix}_{ts}_{np.random.randint(100000):05d}.npz")
-    np.savez_compressed(path, states=states, pis=pis, vs=vs)
+    if compression == "none":
+        np.savez(path, states=states, pis=pis, vs=vs)
+    else:
+        np.savez_compressed(path, states=states, pis=pis, vs=vs)
     return path
 
 
@@ -44,12 +53,22 @@ def load_shards_into_buffer(replay_buffer, out_dir: str = "replay", max_samples:
 
     loaded = 0
     for path in paths:
-        data = np.load(path)
-        states = data["states"]
-        pis = data["pis"]
-        vs = data["vs"]
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                states = data["states"]
+                pis = data["pis"]
+                vs = data["vs"]
+        except (zipfile.BadZipFile, OSError, ValueError, KeyError, EOFError) as exc:
+            print(f"[Replay] Skipping invalid shard: {path} ({exc.__class__.__name__}: {exc})")
+            continue
 
         n = int(states.shape[0])
+        if int(pis.shape[0]) != n or int(vs.shape[0]) != n:
+            print(
+                f"[Replay] Skipping malformed shard: {path} "
+                f"(states={n}, pis={int(pis.shape[0])}, vs={int(vs.shape[0])})"
+            )
+            continue
         samples = [(states[i], pis[i], float(vs[i])) for i in range(n)]
 
         if max_samples is not None and loaded + n > max_samples:

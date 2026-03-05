@@ -52,6 +52,22 @@ def terminal_value_from_to_play(board: chess.Board) -> float:
     return white_value if board.turn == chess.WHITE else -white_value
 
 
+def fast_terminal_value_from_to_play(board: chess.Board) -> float | None:
+    """
+    Fast terminal check from side-to-move perspective.
+
+    Uses only automatic end conditions (checkmate/stalemate/insufficient/75-move/fivefold)
+    and skips claimable-draw checks, which are significantly slower in hot MCTS paths.
+    """
+    if board.is_checkmate():
+        return -1.0
+    if board.is_stalemate() or board.is_insufficient_material():
+        return 0.0
+    if board.is_seventyfive_moves() or board.is_fivefold_repetition():
+        return 0.0
+    return None
+
+
 # ------------------------------------------------------------------
 # Neural-net evaluation
 # ------------------------------------------------------------------
@@ -103,11 +119,16 @@ class Node:
 
 def expand_node(node: Node, net, device: str, add_dirichlet: bool,
                 dirichlet_alpha: float, dirichlet_eps: float,
-                history: list[chess.Board] | None = None) -> float:
+                history: list[chess.Board] | None = None,
+                fast_terminal_checks: bool = True) -> float:
     """Evaluate and expand a leaf node, returning value from side-to-move."""
-    if node.board.is_game_over(claim_draw=True):
+    term_v = fast_terminal_value_from_to_play(node.board) if fast_terminal_checks else None
+    if term_v is None and node.board.is_game_over(claim_draw=True):
+        term_v = terminal_value_from_to_play(node.board)
+
+    if term_v is not None:
         node.terminal = True
-        node.terminal_v = terminal_value_from_to_play(node.board)
+        node.terminal_v = float(term_v)
         node.is_expanded = True
         node.legal_actions = np.array([], dtype=np.int32)
         return float(node.terminal_v)
@@ -127,7 +148,9 @@ def expand_node(node: Node, net, device: str, add_dirichlet: bool,
         node.N[a] = 0
         node.W[a] = 0.0
 
-    if add_dirichlet and len(legal) > 0:
+    # Allow callers (e.g., evaluation) to disable root noise by setting
+    # either alpha<=0 or eps<=0.
+    if add_dirichlet and len(legal) > 0 and dirichlet_alpha > 0.0 and dirichlet_eps > 0.0:
         noise = np.random.dirichlet([dirichlet_alpha] * len(legal))
         for i, a in enumerate(legal):
             a = int(a)
@@ -171,6 +194,7 @@ def mcts_run(
     dirichlet_eps: float = 0.25,
     device: str = "cpu",
     history: list[chess.Board] | None = None,
+    fast_terminal_checks: bool = True,
 ):
     """
     Run *num_sims* MCTS simulations from *root*.
@@ -184,7 +208,8 @@ def mcts_run(
     if not root.is_expanded:
         expand_node(root, net, device, add_dirichlet=True,
                     dirichlet_alpha=dirichlet_alpha, dirichlet_eps=dirichlet_eps,
-                    history=root_history)
+                    history=root_history,
+                    fast_terminal_checks=fast_terminal_checks)
 
     for _ in range(num_sims):
         node = root
@@ -200,7 +225,8 @@ def mcts_run(
                 v = expand_node(node, net, device, add_dirichlet=False,
                                 dirichlet_alpha=dirichlet_alpha,
                                 dirichlet_eps=dirichlet_eps,
-                                history=sim_history)
+                                history=sim_history,
+                                fast_terminal_checks=fast_terminal_checks)
                 break
 
             a = select_action(node, c_puct)
@@ -265,6 +291,7 @@ def mcts_policy_and_action(
     dirichlet_alpha: float = 0.3,
     dirichlet_eps: float = 0.25,
     history: list[chess.Board] | None = None,
+    fast_terminal_checks: bool = True,
 ):
     """Run MCTS then return (pi, chosen_action)."""
     mcts_run(
@@ -275,6 +302,7 @@ def mcts_policy_and_action(
         dirichlet_eps=dirichlet_eps,
         device=device,
         history=history,
+        fast_terminal_checks=fast_terminal_checks,
     )
     pi = root_pi_from_visits(root)
     action = pick_action_from_pi(pi, temperature)

@@ -174,6 +174,18 @@ class ChessControlPanel(tk.Tk):
             "checkpoint_latest.pt",
             "Normal: checkpoint_latest.pt. Any .pt path. If file is older/weaker, training starts weaker.",
         )
+        self.sp_latest_ckpt = self._add_entry(
+            f,
+            "Latest checkpoint out",
+            "checkpoint_latest.pt",
+            "Path to keep latest accepted self-play model.",
+        )
+        self.sp_best_ckpt = self._add_entry(
+            f,
+            "Best checkpoint out",
+            "checkpoint_best.pt",
+            "Path to keep strongest model by promotion rule.",
+        )
         self.sp_puzzle_ckpt = self._add_entry(
             f,
             "Puzzle checkpoint",
@@ -240,6 +252,12 @@ class ChessControlPanel(tk.Tk):
             "0.0",
             "Target for draw-like outcomes. Keep 0.0 for unbiased baseline training.",
         )
+        self.sp_no_claim_draw_terminal = self._add_check(
+            f,
+            "No-claim-draw terminal",
+            False,
+            "Do not auto-end games on claimable draws; helps reduce draw collapse in self-play.",
+        )
         self.sp_stop_threefold = self._add_check(
             f,
             "Stop on threefold",
@@ -275,6 +293,12 @@ class ChessControlPanel(tk.Tk):
             "Temp floor",
             "0.1",
             "Minimum move temperature after opening exploration window.",
+        )
+        self.sp_temp_moves = self._add_entry(
+            f,
+            "Temp moves",
+            "30",
+            "Opening plies that keep higher sampling temperature before using Temp floor.",
         )
         self.sp_use_mat_shape = self._add_check(
             f,
@@ -324,6 +348,48 @@ class ChessControlPanel(tk.Tk):
             "0.52",
             "Minimum gate score to accept a newly trained model.",
         )
+        self.sp_gate_score_mode = self._add_entry(
+            f,
+            "Gate score mode",
+            "score",
+            "score or ci_low. score matches classic threshold behavior; ci_low is stricter.",
+        )
+        self.sp_gate_rand_open = self._add_entry(
+            f,
+            "Gate random opening plies",
+            "6",
+            "For gate eval only: randomize start with 0..N random legal plies.",
+        )
+        self.sp_eval_every = self._add_entry(
+            f,
+            "Eval every",
+            "2",
+            "Run random-baseline eval every N iterations (0 disables).",
+        )
+        self.sp_eval_games = self._add_entry(
+            f,
+            "Eval games",
+            "12",
+            "Random-baseline games per eval pass.",
+        )
+        self.sp_best_score_mode = self._add_entry(
+            f,
+            "Best score mode",
+            "ci_low",
+            "score or ci_low for checkpoint_best promotion metric.",
+        )
+        self.sp_best_promotion_rule = self._add_entry(
+            f,
+            "Best promotion rule",
+            "and_gate_eval",
+            "eval_only or and_gate_eval. and_gate_eval requires gate+eval improvements.",
+        )
+        self.sp_scoreboard_jsonl = self._add_entry(
+            f,
+            "Scoreboard JSONL",
+            "training_scoreboard.jsonl",
+            "Line-delimited per-iteration metrics log. Empty disables file logging.",
+        )
         self.sp_feedback_jsonl = self._add_entry(
             f,
             "Feedback JSONL (optional)",
@@ -360,6 +426,18 @@ class ChessControlPanel(tk.Tk):
             True,
             "50% chance to color-flip each sampled position during training.",
         )
+        self.sp_disable_pgn = self._add_check(
+            f,
+            "Disable self-play PGN export",
+            True,
+            "Reduces disk IO and improves self-play throughput.",
+        )
+        self.sp_disable_replay_compression = self._add_check(
+            f,
+            "Disable replay compression",
+            True,
+            "Writes larger replay shards faster (np.savez instead of compressed).",
+        )
         preset_row = ttk.Frame(f)
         preset_row.pack(fill="x", padx=8, pady=(8, 6))
         ttk.Button(
@@ -369,25 +447,29 @@ class ChessControlPanel(tk.Tk):
         ).pack(side="left")
         ttk.Label(
             preset_row,
-            text="Sets stable defaults to reduce self-play regression.",
+            text="Sets stable anti-draw defaults for stronger self-play signal.",
             foreground="#5f6368",
         ).pack(side="left", padx=(8, 0))
 
     def _apply_safe_selfplay_preset(self) -> None:
         """Populate conservative self-play defaults for more stable fine-tuning."""
         self.sp_prefer_puzzle.set(True)
+        self.sp_latest_ckpt.set("checkpoint_latest.pt")
+        self.sp_best_ckpt.set("checkpoint_best.pt")
         self.sp_puzzle_ckpt.set("checkpoint_puzzle_best.pt")
         self.sp_lr.set("1e-4")
         self.sp_replay_dir.set("replay_fresh")
         self.sp_num_sims.set("400")
         self.sp_eval_num_sims.set("50")
-        self.sp_draw_penalty.set("0.0")
+        self.sp_draw_penalty.set("-0.10")
+        self.sp_no_claim_draw_terminal.set(True)
         self.sp_stop_threefold.set(False)
-        self.sp_no_prog_limit.set("30")
+        self.sp_no_prog_limit.set("50")
         self.sp_no_prog_penalty.set("0.0")
         self.sp_repeat2_penalty.set("0.0")
         self.sp_stop_repeat2.set(False)
-        self.sp_temp_floor.set("0.1")
+        self.sp_temp_floor.set("0.20")
+        self.sp_temp_moves.set("50")
         self.sp_use_mat_shape.set(False)
         self.sp_mat_scale.set("0.0")
         self.sp_exch_scale.set("0.0")
@@ -395,12 +477,21 @@ class ChessControlPanel(tk.Tk):
         self.sp_early_plies.set("16")
         self.sp_late_sims.set("0")
         self.sp_gate_games.set("30")
-        self.sp_gate_min_score.set("0.52")
+        self.sp_gate_min_score.set("0.55")
+        self.sp_gate_score_mode.set("score")
+        self.sp_gate_rand_open.set("6")
+        self.sp_eval_every.set("1")
+        self.sp_eval_games.set("24")
+        self.sp_best_score_mode.set("ci_low")
+        self.sp_best_promotion_rule.set("and_gate_eval")
+        self.sp_scoreboard_jsonl.set("training_scoreboard.jsonl")
         self.sp_feedback_jsonl.set("")
         self.sp_feedback_weight.set("0.2")
         self.sp_feedback_batch.set("32")
         self.sp_feedback_margin.set("0.2")
         self.sp_feedback_max_samples.set("0")
+        self.sp_disable_pgn.set(True)
+        self.sp_disable_replay_compression.set(True)
         self._append_log("[Preset] Applied Safe self-play preset.\n")
 
     def _build_puzzle_train_tab(self) -> None:
@@ -822,6 +913,8 @@ class ChessControlPanel(tk.Tk):
             cmd = [
                 *base, "train-selfplay",
                 "--init_checkpoint", self.sp_init_ckpt.get(),
+                "--latest_checkpoint", self.sp_latest_ckpt.get(),
+                "--best_checkpoint", self.sp_best_ckpt.get(),
                 "--puzzle_checkpoint", self.sp_puzzle_ckpt.get(),
                 "--iters", self.sp_iters.get(),
                 "--games_per_iter", self.sp_games_per_iter.get(),
@@ -836,6 +929,7 @@ class ChessControlPanel(tk.Tk):
                 "--no_progress_penalty", self.sp_no_prog_penalty.get(),
                 "--repeat2_penalty", self.sp_repeat2_penalty.get(),
                 "--temp_floor", self.sp_temp_floor.get(),
+                "--temp_moves", self.sp_temp_moves.get(),
                 "--material_scale", self.sp_mat_scale.get(),
                 "--exchange_scale", self.sp_exch_scale.get(),
                 "--early_sims", self.sp_early_sims.get(),
@@ -843,6 +937,13 @@ class ChessControlPanel(tk.Tk):
                 "--late_sims", self.sp_late_sims.get(),
                 "--gate_games", self.sp_gate_games.get(),
                 "--gate_min_score", self.sp_gate_min_score.get(),
+                "--gate_score_mode", self.sp_gate_score_mode.get(),
+                "--gate_random_opening_plies", self.sp_gate_rand_open.get(),
+                "--eval_every", self.sp_eval_every.get(),
+                "--eval_games", self.sp_eval_games.get(),
+                "--best_score_mode", self.sp_best_score_mode.get(),
+                "--best_promotion_rule", self.sp_best_promotion_rule.get(),
+                "--scoreboard_jsonl", self.sp_scoreboard_jsonl.get(),
                 "--feedback_weight", self.sp_feedback_weight.get(),
                 "--feedback_batch_size", self.sp_feedback_batch.get(),
                 "--feedback_margin", self.sp_feedback_margin.get(),
@@ -852,6 +953,8 @@ class ChessControlPanel(tk.Tk):
                 cmd += ["--feedback_jsonl", self.sp_feedback_jsonl.get().strip()]
             if self.sp_prefer_puzzle.get():
                 cmd.append("--prefer_puzzle_init")
+            if self.sp_no_claim_draw_terminal.get():
+                cmd.append("--no_claim_draw_terminal")
             if self.sp_stop_threefold.get():
                 cmd.append("--stop_on_threefold")
             if self.sp_stop_repeat2.get():
@@ -860,6 +963,10 @@ class ChessControlPanel(tk.Tk):
                 cmd.append("--use_material_shaping")
             if self.sp_augment.get():
                 cmd.append("--augment")
+            if self.sp_disable_pgn.get():
+                cmd.append("--disable_pgn")
+            if self.sp_disable_replay_compression.get():
+                cmd.append("--disable_replay_compression")
         elif tab_name == "Puzzle Train":
             cmd = [
                 *base, "train-puzzles",

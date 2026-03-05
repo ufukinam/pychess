@@ -19,6 +19,8 @@ def _py(script: str) -> list[str]:
 def cmd_train_selfplay(args: argparse.Namespace) -> int:
     cmd = _py("train.py")
     cmd += ["--init_checkpoint", args.init_checkpoint]
+    cmd += ["--latest_checkpoint", args.latest_checkpoint]
+    cmd += ["--best_checkpoint", args.best_checkpoint]
     cmd += ["--puzzle_checkpoint", args.puzzle_checkpoint]
     cmd += ["--iters", str(args.iters)]
     cmd += ["--games_per_iter", str(args.games_per_iter)]
@@ -29,10 +31,13 @@ def cmd_train_selfplay(args: argparse.Namespace) -> int:
     cmd += ["--num_sims", str(args.num_sims)]
     cmd += ["--eval_num_sims", str(args.eval_num_sims)]
     cmd += ["--draw_penalty", str(args.draw_penalty)]
+    if args.no_claim_draw_terminal:
+        cmd.append("--no_claim_draw_terminal")
     cmd += ["--no_progress_limit", str(args.no_progress_limit)]
     cmd += ["--no_progress_penalty", str(args.no_progress_penalty)]
     cmd += ["--repeat2_penalty", str(args.repeat2_penalty)]
     cmd += ["--temp_floor", str(args.temp_floor)]
+    cmd += ["--temp_moves", str(args.temp_moves)]
     cmd += ["--material_scale", str(args.material_scale)]
     cmd += ["--exchange_scale", str(args.exchange_scale)]
     cmd += ["--early_sims", str(args.early_sims)]
@@ -40,6 +45,13 @@ def cmd_train_selfplay(args: argparse.Namespace) -> int:
     cmd += ["--late_sims", str(args.late_sims)]
     cmd += ["--gate_games", str(args.gate_games)]
     cmd += ["--gate_min_score", str(args.gate_min_score)]
+    cmd += ["--gate_score_mode", str(args.gate_score_mode)]
+    cmd += ["--gate_random_opening_plies", str(args.gate_random_opening_plies)]
+    cmd += ["--eval_every", str(args.eval_every)]
+    cmd += ["--eval_games", str(args.eval_games)]
+    cmd += ["--best_score_mode", str(args.best_score_mode)]
+    cmd += ["--best_promotion_rule", str(args.best_promotion_rule)]
+    cmd += ["--scoreboard_jsonl", str(args.scoreboard_jsonl)]
     cmd += ["--feedback_weight", str(args.feedback_weight)]
     cmd += ["--feedback_batch_size", str(args.feedback_batch_size)]
     cmd += ["--feedback_margin", str(args.feedback_margin)]
@@ -56,6 +68,10 @@ def cmd_train_selfplay(args: argparse.Namespace) -> int:
         cmd.append("--stop_on_repeat2")
     if args.use_material_shaping:
         cmd.append("--use_material_shaping")
+    if args.disable_pgn:
+        cmd.append("--disable_pgn")
+    if args.disable_replay_compression:
+        cmd.append("--disable_replay_compression")
     if getattr(args, "augment", False):
         cmd.append("--augment")
     return _run(cmd)
@@ -184,6 +200,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Primary self-play checkpoint path to load first.",
     )
     sp.add_argument(
+        "--latest_checkpoint",
+        type=str,
+        default="checkpoint_latest.pt",
+        help="Path for latest accepted self-play checkpoint.",
+    )
+    sp.add_argument(
+        "--best_checkpoint",
+        type=str,
+        default="checkpoint_best.pt",
+        help="Path for best-scoring self-play checkpoint.",
+    )
+    sp.add_argument(
         "--puzzle_checkpoint",
         type=str,
         default="checkpoint_puzzle_best.pt",
@@ -211,12 +239,18 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--num_sims", type=int, default=400, help="MCTS sims per self-play move.")
     sp.add_argument("--eval_num_sims", type=int, default=50, help="MCTS sims for evaluations.")
     sp.add_argument("--draw_penalty", type=float, default=0.0, help="Target value for draw-like outcomes.")
+    sp.add_argument(
+        "--no_claim_draw_terminal",
+        action="store_true",
+        help="Do not treat claimable draws as immediate terminal states during self-play.",
+    )
     sp.add_argument("--stop_on_threefold", action="store_true", help="Stop games on claimable threefold repetition.")
     sp.add_argument("--no_progress_limit", type=int, default=30, help="Halfmove cutoff for no-progress stop.")
     sp.add_argument("--no_progress_penalty", type=float, default=0.0, help="Target value for no-progress stop.")
     sp.add_argument("--repeat2_penalty", type=float, default=0.0, help="Target value when repeat2 stop is enabled.")
     sp.add_argument("--stop_on_repeat2", action="store_true", help="Stop game on second position repetition.")
     sp.add_argument("--temp_floor", type=float, default=0.1, help="Post-opening move temperature floor.")
+    sp.add_argument("--temp_moves", type=int, default=30, help="Opening plies that keep high-temperature sampling.")
     sp.add_argument("--use_material_shaping", action="store_true", help="Enable material/exchange shaping.")
     sp.add_argument("--material_scale", type=float, default=0.0, help="Material shaping scale.")
     sp.add_argument("--exchange_scale", type=float, default=0.0, help="Exchange shaping scale.")
@@ -225,11 +259,52 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--late_sims", type=int, default=0, help="Late-game sims per move (0=use num_sims).")
     sp.add_argument("--gate_games", type=int, default=30, help="Gating games vs previous model (0 disables).")
     sp.add_argument("--gate_min_score", type=float, default=0.52, help="Minimum gate score to accept update.")
+    sp.add_argument(
+        "--gate_score_mode",
+        type=str,
+        choices=("score", "ci_low"),
+        default="score",
+        help="Use raw gate score or ci95 lower bound for gate acceptance.",
+    )
+    sp.add_argument(
+        "--gate_random_opening_plies",
+        type=int,
+        default=6,
+        help="For gate eval only: randomize each game start with 0..N random legal plies.",
+    )
+    sp.add_argument("--eval_every", type=int, default=2, help="Run random eval every N iterations (0 disables).")
+    sp.add_argument("--eval_games", type=int, default=12, help="Games per random-baseline eval.")
+    sp.add_argument(
+        "--best_score_mode",
+        type=str,
+        choices=("score", "ci_low"),
+        default="ci_low",
+        help="Use raw eval score or ci95 lower bound when updating checkpoint_best.",
+    )
+    sp.add_argument(
+        "--best_promotion_rule",
+        type=str,
+        choices=("eval_only", "and_gate_eval"),
+        default="and_gate_eval",
+        help="Best promotion: eval-only or require both gate+eval improvements.",
+    )
+    sp.add_argument(
+        "--scoreboard_jsonl",
+        type=str,
+        default="training_scoreboard.jsonl",
+        help="Append per-iteration score records to JSONL (empty disables).",
+    )
     sp.add_argument("--feedback_jsonl", type=str, default="", help="Optional JSONL with (fen, bad_move, good_move) feedback pairs.")
     sp.add_argument("--feedback_weight", type=float, default=0.2, help="Weight for feedback ranking loss (0 disables feedback).")
     sp.add_argument("--feedback_batch_size", type=int, default=32, help="Feedback batch size per train update.")
     sp.add_argument("--feedback_margin", type=float, default=0.2, help="Required logit margin for good over bad move.")
     sp.add_argument("--feedback_max_samples", type=int, default=0, help="Optional cap for loaded feedback samples (0=all).")
+    sp.add_argument("--disable_pgn", action="store_true", help="Disable self-play PGN export for faster generation.")
+    sp.add_argument(
+        "--disable_replay_compression",
+        action="store_true",
+        help="Disable replay shard compression (faster disk writes, larger files).",
+    )
     sp.add_argument("--augment", action="store_true", help="Enable color-flip augmentation on replay batches.")
     sp.set_defaults(func=cmd_train_selfplay)
 
